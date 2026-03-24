@@ -1,0 +1,6 @@
+﻿{
+    "scripts": {
+        "rebuild-start": "cd docker && docker build -t translation-service . && docker run -p 5002:5002 -v \"%cd%\\tests\\resources\\translations\":/translations translation-service",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    }
+}
