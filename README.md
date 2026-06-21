@@ -34,12 +34,22 @@ Its primary goal is to provide an independent lifecycle for translations. While 
 
 ---
 
-## 3. Source Translation Storage Model
+## 3. Versioning Rules
+
+Uses Semantic Versioning (MAJOR.MINOR.PATCH):
+
+- **MAJOR**: Breaking changes (removed keys, renamed keys, changed placeholders)
+- **MINOR**: Added translations, Non-breaking extensions
+- **PATCH**: Fixes in wording only (no structural change)
+
+---
+
+## 4. Source Translation Storage Model
 
 Translations are stored in a Docker volume using the following structure:
 
-<docker_volume>/library-name/version/config.yaml
-<docker_volume>/library-name/version/section/locale.yaml
+- <docker_volume>/library-name/version/config.yaml
+- <docker_volume>/library-name/version/section/locale.yaml
 
 Where:
 
@@ -60,9 +70,9 @@ Examples:
 
 ---
 
-## 4. Canonical Translation Format
+## 5. Canonical Translation Format
 
-### 4.1 Key format
+### 5.1 Key format
 
 Keys are **flat strings (recommended)** using dot notation:
 
@@ -71,12 +81,12 @@ login: "Login"
 sign.in: "Sign in"
 ```
 
-### 4.2 Character encoding
+### 5.2 Character encoding
 
 All files MUST be UTF-8 encoded (without BOM recommended).
 Unicode characters are fully supported.
 
-### 4.3 Placeholders
+### 5.3 Placeholders
 
 Must use ICU MessageFormat syntax:
 
@@ -85,18 +95,18 @@ hello.username: "Hello {name}"
 user.unread: "{count, plural, one {1 message} other {{count} messages}}"
 ```
 
-### 4.4 Rules
+### 5.4 Rules
 
 - Keys must be stable across versions unless the major version is bumped.
 - Placeholders must be consistent across all locales.
 
 ---
 
-## 5. Missing Translations & Fallback Strategy
+## 6. Missing Translations & Fallback Strategy
 
 The microservice will combine missing locales by using a chain of translation priority. The behavior for handling missing translations is defined by the `config.yaml` file located at the root of each **versioned** directory.
 
-### 5.1 Configuration Format (`config.yaml`)
+### 6.1 Configuration Format (`config.yaml`)
 
 The `config.yaml` file and its properties are **mandatory**. If the file is missing or malformed, the microservice will refuse to load the version.
 
@@ -108,26 +118,49 @@ locale_priority: # The first item acts as the primary master list of keys. Next 
 on_missing_translation: "error" # Options: error, return_key, return_empty, fallback_by_priority
 ```
 
-### 5.2 Behavior Modes (`on_missing_translation`)
+### 6.2 Behavior Modes (`on_missing_translation`)
 
 To determine if a key is missing, the microservice compares the requested locale against the master list of keys defined by the first locale in the locale_priority list.
 
-- **`error`**: The ingestion phase will fail completely if any locale is missing keys present in the primary locale (the first item in locale_priority). The version will refuse to load.
+- **`error`**: The ingestion phase will fail completely if any locale is missing keys present in the **primary locale** (the first item in `locale_priority`). The version will refuse to load.
 - **`fallback_by_priority`**: The missing value is replaced by traversing down the locale_priority list and using the first available value it finds.
 - **`return_key`**: The missing value is replaced with the raw key name (e.g., `"login.title"`).
 - **`return_empty`**: The missing value is replaced with an empty string `""`.
 
 ---
 
-## 6. API Specification
+## 7. Validation & Lifecycle Rules
 
-### 6.1 Base URL
+To ensure high availability and prevent runtime crashes, **validation is strictly separated from retrieval.**
+
+**Startup / Ingestion Phase:**
+
+When the container starts (or when a new version directory is added to the volume), the service parses all YAML files and performs:
+
+- YAML 1.2 strict syntax validation (preventing boolean casting of strings like 'no').
+- Key format validation (ensuring flat dot-notation).
+- Placeholder consistency validation across all locales in a library.
+- **Orphan Key Validation**: Verifies that non-primary locales do not contain extra/obsolete keys that are absent in the primary locale.
+- **Completeness Validation**: If `on_missing_translation` is set to `error`, validates that all locales contain 100% of the keys present in the primary locale (the first item in `locale_priority`).
+
+*If validation fails, the service logs a CRITICAL error and refuses to load the bad version into memory.*
+
+**Request Phase (Runtime):**
+
+- No validation is performed on read.
+- The requested translation is fetched, transformed, and cached instantly.
+
+---
+
+## 8. API Specification
+
+### 8.1 Base URL
 
 `/api/v1`
 
 (API version is independent from translation library versions)
 
-### 6.2 Retrieve translations
+### 8.2 Retrieve translations
 
 `GET /api/v1/{library}/{version}/{section}/{format}/{locale}.{format-extension}`
 
@@ -142,7 +175,7 @@ To determine if a key is missing, the microservice compares the requested locale
 
 `GET /api/v1/users/1.0.0/login/android/en-US.xml`
 
-### 6.3 Response behavior
+### 8.3 Response behavior
 
 Responses are lazy-cached. If previously requested and cached, data is directly returned. If not cached:
 
@@ -153,53 +186,21 @@ Responses are lazy-cached. If previously requested and cached, data is directly 
 
 ---
 
-## 7. Caching Strategy
-
-- In-memory cache, with disk storage to avoid losing performance between container reboots.
-- Cached values never expire, because the source data is versioned and immutable.
-- API responses include aggressive HTTP Cache-Control headers (e.g., `Cache-Control: public, max-age=31536000, immutable`) to leverage browser and CDN caching.
-
----
-
-## 8. Validation & Lifecycle Rules
-
-To ensure high availability and prevent runtime crashes, **validation is strictly separated from retrieval.**
-
-**Startup / Ingestion Phase:**
-
-When the container starts (or when a new version directory is added to the volume), the service parses all YAML files and performs:
-
-- YAML 1.2 strict syntax validation (preventing boolean casting of strings like 'no').
-- Key format validation (ensuring flat dot-notation).
-- Placeholder consistency validation across all locales in a library.
-- **Completeness Validation**: If `on_missing_translation` is set to `error`, validates that all locales contain 100% of the keys present in the primary locale (the first item in `locale_priority`).
-
-*If validation fails, the service logs a CRITICAL error and refuses to load the bad version into memory.*
-
-**Request Phase (Runtime):**
-
-- No validation is performed on read.
-- The requested translation is fetched, transformed, and cached instantly.
-
----
-
-## 9. Versioning Rules
-
-Uses Semantic Versioning (MAJOR.MINOR.PATCH):
-
-- **MAJOR**: Breaking changes (removed keys, renamed keys, changed placeholders)
-- **MINOR**: Added translations, Non-breaking extensions
-- **PATCH**: Fixes in wording only (no structural change)
-
----
-
-## 10. Error Handling
+## 9. Error Handling
 
 - **404 Not Found**: Library/version/section/locale does not exist.
 - **400 Bad Request**: Unsupported format or extension combination.
 - **500 Internal Server Error**: Internal transformation failure (e.g., corrupted internal cache).
 
 *(Note: Data validation errors are caught during CI/CD or container boot, not at request time).*
+
+---
+
+## 10. Caching Strategy
+
+- In-memory cache, with disk storage to avoid losing performance between container reboots.
+- Cached values never expire, because the source data is versioned and immutable.
+- API responses include aggressive HTTP Cache-Control headers (e.g., `Cache-Control: public, max-age=31536000, immutable`) to leverage browser and CDN caching.
 
 ---
 
