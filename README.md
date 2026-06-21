@@ -1,215 +1,194 @@
 # Translation Microservice Specification
 
-The Translation Microservice is a containerized service that provides a centralized, versioned source of truth for software translations. It exposes an API that allows clients to retrieve localized text in multiple formats for different platforms (e.g. Android, iOS, Web, backend systems).
+## 1. Overview
 
-Its primary goal is to provide an independent lifecycle for translations. While translation sets are developed and versioned independently, applications bind to specific, immutable versions to guarantee absolute runtime determinism.
+A containerized microservice providing a centralized, versioned translation source of truth. Applications bind to specific, immutable translation versions for runtime determinism. It exposes an API that allows clients to retrieve localized text in multiple formats for different platforms (e.g. Android, iOS, Web, backend systems).
 
----
+**Core principles:**
 
-## 1. Core Principles
-
-- **Single Source of Truth**: All translations are stored in a canonical format.
-- **Versioned Contracts**: Translation sets are immutable once published.
-- **Format Agnostic Output**: Translations can be transformed into multiple runtime formats.
-- **Library-oriented**: Translations can be organized in multiple independent libraries.
-- **Deterministic Output**: Same input always produces identical output.
+- Canonical YAML storage — single source of truth
+- Immutable published versions — guaranteed determinism
+- Platform-agnostic output — Android, iOS, Web, backend formats
+- Library-scoped — independent lifecycle per domain
 
 ---
 
-## 2. Features
+## 2. Storage Structure
 
-- Stores all translations in a structured, versioned repository.
-- Uses YAML as the canonical source format.
-- Supports multiple libraries (domain-based grouping of translations).
-- Supports semantic versioning per library.
-- Allows runtime conversion to multiple output formats:
-  - Android (XML / Compose / properties)
-  - iOS (.strings / xcstrings)
-  - JSON
-  - ICU MessageFormat bundles
-  - Gettext (PO/MO)
-- Provides caching of generated artifacts to improve performance.
-- Allows adding new translation versions without affecting existing consumers.
-- Provides validation of translation structure and completeness.
+Translations are stored in a Docker volume:
 
----
+```text
+<docker_volume>/library-name/version/config.yaml
+<docker_volume>/library-name/version/section/locale.yaml
+```
 
-## 3. Versioning Rules
+| Segment | Description | Example |
+| --- | --- | --- |
+| `library-name` | Domain grouping | `users`, `billing` |
+| `version` | Semantic version | `1.0.0`, `2.1.0` |
+| `section` | Functional grouping within a library | `login`, `checkout` |
+| `locale.yaml` | Translations for a single locale | `en-US.yaml` |
 
-Uses Semantic Versioning (MAJOR.MINOR.PATCH):
+**Example layout:**
 
-- **MAJOR**: Breaking changes (removed keys, renamed keys, changed placeholders)
-- **MINOR**: Added translations, Non-breaking extensions
-- **PATCH**: Fixes in wording only (no structural change)
+```text
+users/1.0.0/config.yaml
+users/1.0.0/login/en-US.yaml
+users/1.0.0/login/es-ES.yaml
+```
 
 ---
 
-## 4. Source Translation Storage Model
+## 3. Versioning
 
-Translations are stored in a Docker volume using the following structure:
+Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once published**.
 
-- <docker_volume>/library-name/version/config.yaml
-- <docker_volume>/library-name/version/section/locale.yaml
-
-Where:
-
-- **config.yaml**: A mandatory configuration file defining library-version specific behaviors (like fallback strategies).
-- **library-name**: A logical grouping of translations for a product or domain (e.g. `users`, `billing`, `notifications`).
-- **version**: Semantic version of the translation contract (e.g. `1.0.0`, `2.1.0`).
-  - Versions are **immutable once published**
-  - Breaking changes require a major version bump
-  - Each version represents a stable contract
-- **section**: A functional grouping inside a library (e.g. `login`, `profile`, `checkout`).
-- **locale.yaml**: A YAML file containing translations for a single locale (e.g. `ca-ES.yaml`, `en-US.yaml`).
-
-Examples:
-
-- users/1.0.0/config.yaml
-- users/1.0.0/login/en-US.yaml
-- users/1.0.0/login/es-ES.yaml
+| Change type | Bump |
+| --- | --- |
+| Removed/renamed keys, changed placeholders | MAJOR |
+| New keys added | MINOR |
+| Wording fixes only | PATCH |
 
 ---
 
-## 5. Canonical Translation Format
+## 4. Translation Format
 
-### 5.1 Key format
+### 4.1 Keys
 
-Keys are **flat strings (recommended)** using dot notation:
+Flat dot-notation strings stored as **top-level YAML keys** (no nesting):
 
 ```yaml
 login: "Login"
 sign.in: "Sign in"
 ```
 
-### 5.2 Character encoding
+### 4.2 Placeholders
 
-All files MUST be UTF-8 encoded (without BOM recommended).
-Unicode characters are fully supported.
-
-### 5.3 Placeholders
-
-Must use ICU MessageFormat syntax:
+Use ICU MessageFormat syntax. Placeholders must be consistent across all locales for a given key:
 
 ```yaml
 hello.username: "Hello {name}"
-user.unread: "{count, plural, one {1 message} other {{count} messages}}"
+user.unread: "{count, plural, one {# message} other {# messages}}"
 ```
 
-### 5.4 Rules
+### 4.3 Encoding
 
-- Keys must be stable across versions unless the major version is bumped.
-- Placeholders must be consistent across all locales.
+All files must be UTF-8 encoded (without BOM recommended, with full Unicode support).
 
 ---
 
-## 6. Missing Translations & Fallback Strategy
+## 5. Library Configuration (`config.yaml`)
 
-The microservice will combine missing locales by using a chain of translation priority. The behavior for handling missing translations is defined by the `config.yaml` file located at the root of each **versioned** directory.
-
-### 6.1 Configuration Format (`config.yaml`)
-
-The `config.yaml` file and its properties are **mandatory**. If the file is missing or malformed, the microservice will refuse to load the version.
+Required at the root of each versioned library. A missing or malformed file causes the version to be rejected at load time.
 
 ```yaml
-locale_priority: # The first item acts as the primary master list of keys. Next ones are the fallback order used to compile the final keys
-  - "en-US"
+locale_priority:
+  - "en-US"   # Primary locale — defines the master key set
   - "es-ES"
-  - "ca-ES" 
-on_missing_translation: "error" # Options: error, return_key, return_empty, fallback_by_priority
+  - "ca-ES"
+on_missing_translation: "fallback_by_priority"
 ```
 
-### 6.2 Behavior Modes (`on_missing_translation`)
+**`on_missing_translation` modes:**
 
-To determine if a key is missing, the microservice compares the requested locale against the master list of keys defined by the first locale in the locale_priority list.
+| Mode | Behavior |
+| --- | --- |
+| `error` | Reject the version at load time if any locale is missing keys from the primary locale |
+| `fallback_by_priority` | Replace missing value with the first match down the priority list |
+| `return_key` | Replace missing value with the raw key name (e.g. `"login.title"`) |
+| `return_empty` | Replace missing value with `""` |
 
-- **`error`**: The ingestion phase will fail completely if any locale is missing keys present in the **primary locale** (the first item in `locale_priority`). The version will refuse to load.
-- **`fallback_by_priority`**: The missing value is replaced by traversing down the locale_priority list and using the first available value it finds.
-- **`return_key`**: The missing value is replaced with the raw key name (e.g., `"login.title"`).
-- **`return_empty`**: The missing value is replaced with an empty string `""`.
-
----
-
-## 7. Validation & Lifecycle Rules
-
-To ensure high availability and prevent runtime crashes, **validation is strictly separated from retrieval.**
-
-**Startup / Ingestion Phase:**
-
-When the container starts (or when a new version directory is added to the volume), the service parses all YAML files and performs:
-
-- YAML 1.2 strict syntax validation (preventing boolean casting of strings like 'no').
-- Key format validation (ensuring flat dot-notation).
-- Placeholder consistency validation across all locales in a library.
-- **Orphan Key Validation**: Verifies that non-primary locales do not contain extra/obsolete keys that are absent in the primary locale.
-- **Completeness Validation**: If `on_missing_translation` is set to `error`, validates that all locales contain 100% of the keys present in the primary locale (the first item in `locale_priority`).
-
-*If validation fails, the service logs a CRITICAL error and refuses to load the bad version into memory.*
-
-**Request Phase (Runtime):**
-
-- No validation is performed on read.
-- The requested translation is fetched, transformed, and cached instantly.
+The **first entry** in `locale_priority` is the primary locale. Its keys define the master key set. Non-primary locales must not contain keys absent from the primary locale (orphan keys will cause error).
 
 ---
 
-## 8. API Specification
+## 6. Validation
 
-### 8.1 Base URL
+Runs at container start and whenever a new version is detected to ensure high availability and prevent runtime crashes. A failed check logs a CRITICAL error and prevents the version from loading. **No validation occurs at request time.**
 
-`/api/v1`
-
-(API version is independent from translation library versions)
-
-### 8.2 Retrieve translations
-
-`GET /api/v1/{library}/{version}/{section}/{format}/{locale}.{format-extension}`
-
-- **library**: The library name
-- **version**: A valid semver value
-- **section**: The section name
-- **format**: output format (json, properties, android, ios, icu, gettext)
-- **locale**: The language to obtain: `en-US`, `es-ES` ...
-- **format-extension**: The file extension as expected by the requested format (Must be correctly defined or an error will happen)
-
-**Example:**
-
-`GET /api/v1/users/1.0.0/login/android/en-US.xml`
-
-### 8.3 Response behavior
-
-Responses are lazy-cached. If previously requested and cached, data is directly returned. If not cached:
-
-- Load YAML source files
-- Transform to requested format (applying fallback strategies if necessary)
-- Store into cache
-- Return response
+| Check | Always | Only when `on_missing_translation: error` |
+| --- | --- | --- |
+| YAML 1.2 strict syntax (prevents boolean casting of 'no', 'true') | ✓ | |
+| Flat dot-notation key format | ✓ | |
+| Placeholder consistency across locales | ✓ | |
+| No orphan keys in non-primary locales | ✓ | |
+| 100% key completeness across all locales | | ✓ |
 
 ---
 
-## 9. Error Handling
+## 7. API
 
-- **404 Not Found**: Library/version/section/locale does not exist.
-- **400 Bad Request**: Unsupported format or extension combination.
-- **500 Internal Server Error**: Internal transformation failure (e.g., corrupted internal cache).
+### 7.1 Base URL
 
-*(Note: Data validation errors are caught during CI/CD or container boot, not at request time).*
+`/api/v1` *(independent from library versions)*
+
+### 7.2 Retrieve Translations
+
+```sh
+# Get the translations (with the required format) for a specific locale from a section of a library version
+GET /api/v1/{library}/{version}/{format}/{locale}/{section}.{extension}
+
+# Get the translations (with the required format) for a specific locale from N sections of a library version
+GET /api/v1/{library}/{version}/{format}/{locale}/{section1+...+sectionN}.{extension}
+
+# Get the translations (with the required format) for a specific locale from a whole library version
+GET /api/v1/{library}/{version}/{format}/{locale}.{extension}
+```
+
+**Examples:**
+
+```sh
+
+# Get an android XML file with all the english translations from the login section of the users library v1.0.0
+`GET /api/v1/users/1.0.0/android/en-US/login.xml`
+
+# Get an android XML file with all the english translations from the login and checkout sections of the users library v1.0.0
+`GET /api/v1/users/1.0.0/android/en-US/login+checkout.xml`
+
+# Get an android XML file with all the english translations from all the sections of the users library v1.0.0
+`GET /api/v1/users/1.0.0/android/en-US.xml`
+```
+
+**Supported formats and extensions:**
+
+| `format` | Valid `ext` |
+| --- | --- |
+| `android` | `.xml`, `.kt (for Compose)`, `.properties` |
+| `ios` | `.strings`, `.xcstrings` |
+| `json` | `.json` |
+| `icu` | `.json` |
+| `gettext` | `.po`, `.mo` |
+
+### 7.3 Caching & Response
+
+Responses are lazy-cached (in-memory, persisted to disk to avoid losing performance between container reboots). On first request:
+
+1. Load YAML sources
+2. Apply fallback strategy if needed
+3. Cache result and return
+
+Because source data is immutable, cached entries never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
+
+```text
+Cache-Control: public, max-age=31536000, immutable
+```
+
+### 7.4 Error Codes
+
+| Code | Meaning |
+| --- | --- |
+| `404` | Library, version, section, or locale not found |
+| `400` | Unsupported format/extension combination |
+| `500` | Internal transformation failure |
 
 ---
 
-## 10. Caching Strategy
+## 8. Observability
 
-- In-memory cache, with disk storage to avoid losing performance between container reboots.
-- Cached values never expire, because the source data is versioned and immutable.
-- API responses include aggressive HTTP Cache-Control headers (e.g., `Cache-Control: public, max-age=31536000, immutable`) to leverage browser and CDN caching.
-
----
-
-## 11. Observability
-
-The service logs:
+The service emits:
 
 - Request latency metrics
 - Cache hit/miss ratio
-- Number of generated artifacts
-- Validation failures during ingestion
-- Missing translation reports (Warnings logged during ingestion if fallback modes are utilized)
+- Artifact generation count
+- Validation failures (ingestion)
+- Missing translation warnings (when any fallback mode is active)
