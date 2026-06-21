@@ -15,7 +15,7 @@ A containerized microservice providing a centralized, versioned translation sour
 
 ## 2. Storage Structure
 
-Translations are stored in a Docker volume:
+Translations are uploaded and stored in a Docker volume:
 
 ```text
 <docker_volume>/library-name/version/config.yaml
@@ -28,6 +28,8 @@ Translations are stored in a Docker volume:
 | `version` | Semantic version | `1.0.0`, `2.1.0` |
 | `section` | Functional grouping within a library | `login`, `checkout` |
 | `locale.yaml` | Translations for a single locale | `en-US.yaml` |
+
+**Library naming:** Library names must match `[a-z0-9][a-z0-9-]*` — lowercase letters, digits, and hyphens only. Must begin with a letter or digit.
 
 **Example layout:**
 
@@ -79,7 +81,7 @@ All files must be UTF-8 encoded (without BOM recommended, with full Unicode supp
 
 ## 5. Library Configuration (`config.yaml`)
 
-Required at the root of each versioned library. A missing or malformed file causes the version to be rejected at load time.
+Required at the root of each versioned library. A missing or malformed file causes the version to be rejected at upload time.
 
 ```yaml
 locale_priority:
@@ -93,26 +95,26 @@ on_missing_translation: "fallback_by_priority"
 
 | Mode | Behavior |
 | --- | --- |
-| `error` | Reject the version at load time if any locale is missing keys from the primary locale |
+| `error` | Reject the entire library at upload time if any locale in any section is missing keys defined by the primary locale |
 | `fallback_by_priority` | Replace missing value with the first match down the priority list |
 | `return_key` | Replace missing value with the raw key name (e.g. `"login.title"`) |
 | `return_empty` | Replace missing value with `""` |
 
-The **first entry** in `locale_priority` is the primary locale. Its keys define the master key set. Non-primary locales must not contain keys absent from the primary locale (orphan keys will cause error).
+The **first entry** in `locale_priority` is the primary locale. Its keys define the master key set. Non-primary locales must not contain keys absent from the primary locale — orphan keys will cause the version to be rejected at upload time.
 
 ---
 
 ## 6. Validation
 
-Runs at container start and whenever a new version is detected to ensure high availability and prevent runtime crashes. A failed check logs a CRITICAL error and prevents the version from loading. **No validation occurs at request time.**
+Runs at **container startup** (for all already-stored library versions) and on each **upload API call** (for the incoming version only). A failed check logs a CRITICAL error and prevents the version from loading. **No validation occurs at request time.**
 
 | Check | Always | Only when `on_missing_translation: error` |
 | --- | --- | --- |
-| YAML 1.2 strict syntax (prevents boolean casting of 'no', 'true') | ✓ | |
+| YAML 1.2 strict syntax (prevents boolean casting of `no`, `true`) | ✓ | |
 | Flat dot-notation key format | ✓ | |
 | Placeholder consistency across locales | ✓ | |
 | No orphan keys in non-primary locales | ✓ | |
-| 100% key completeness across all locales | | ✓ |
+| 100% key completeness across all locales and sections | | ✓ |
 
 ---
 
@@ -122,64 +124,124 @@ Runs at container start and whenever a new version is detected to ensure high av
 
 `/api/v1` *(independent from library versions)*
 
-### 7.2 Retrieve Translations
+---
+
+### 7.2 Upload Library Version
 
 ```sh
-# Get the translations (with the required format) for a specific locale from a section of a library version
-GET /api/v1/{library}/{version}/{format}/{locale}/{section}.{extension}
+POST /api/v1/upload
+Content-Type: multipart/form-data
+```
 
-# Get the translations (with the required format) for a specific locale from N sections of a library version
-GET /api/v1/{library}/{version}/{format}/{locale}/{section1+...+sectionN}.{extension}
+Uploads one or more versioned libraries to the service. The request body must include a `file` field containing a `.zip` archive. The zip must mirror the storage structure defined in [Section 2](#2-storage-structure)
 
-# Get the translations (with the required format) for a specific locale from a whole library version
-GET /api/v1/{library}/{version}/{format}/{locale}.{extension}
+A zip may contain multiple library versions. Each library+version is validated and stored as an independent unit but if one fails, all the zip file fails and nothing is imported.
+
+If all libraries can be imported, a standard 200 response is given.
+
+If the request itself is malformed (missing `file` field, invalid zip), a `400 Bad Request` is returned using the [standard error response](#77-error-responses).
+
+---
+
+### 7.3 Retrieve Translations
+
+```sh
+# Get translations for a specific locale from a single section
+GET /api/v1/lib/{library}/{version}/{format}/{locale}/{section}.{extension}
+
+# Get translations for a specific locale from multiple sections
+GET /api/v1/lib/{library}/{version}/{format}/{locale}/{section1},{section2},...,{sectionN}.{extension}
+
+# Get translations for a specific locale from an entire library version
+GET /api/v1/lib/{library}/{version}/{format}/{locale}.{extension}
 ```
 
 **Examples:**
 
 ```sh
+# Android XML — English translations from the login section of users v1.0.0
+GET /api/v1/lib/users/1.0.0/android/en-US/login.xml
 
-# Get an android XML file with all the english translations from the login section of the users library v1.0.0
-`GET /api/v1/users/1.0.0/android/en-US/login.xml`
+# Android XML — English translations from the login and checkout sections of users v1.0.0
+GET /api/v1/lib/users/1.0.0/android/en-US/login,checkout.xml
 
-# Get an android XML file with all the english translations from the login and checkout sections of the users library v1.0.0
-`GET /api/v1/users/1.0.0/android/en-US/login+checkout.xml`
-
-# Get an android XML file with all the english translations from all the sections of the users library v1.0.0
-`GET /api/v1/users/1.0.0/android/en-US.xml`
+# Android XML — all English translations from every section of users v1.0.0
+GET /api/v1/lib/users/1.0.0/android/en-US.xml
 ```
 
 **Supported formats and extensions:**
 
-| `format` | Valid `ext` |
-| --- | --- |
-| `android` | `.xml`, `.kt (for Compose)`, `.properties` |
-| `ios` | `.strings`, `.xcstrings` |
-| `json` | `.json` |
-| `icu` | `.json` |
-| `gettext` | `.po`, `.mo` |
+| `format` | Valid `extension` | Notes |
+| --- | --- | --- |
+| `android` | `.xml`, `.kt`, `.properties` | `.kt` targets Jetpack Compose (type-safe string accessors) |
+| `ios` | `.strings`, `.xcstrings` | |
+| `json` | `.json` | |
+| `icu` | `.json` | |
+| `gettext` | `.po` | |
 
-### 7.3 Caching & Response
+---
 
-Responses are lazy-cached (in-memory, persisted to disk to avoid losing performance between container reboots). On first request:
+### 7.4 Catalog
 
-1. Load YAML sources
+Returns a human-readable HTML page listing all stored libraries, their published versions, and for each version: the available sections and supported locales. It also gives information about missing keys or inconsistent state.
+
+```sh
+GET /api/v1/catalog
+```
+
+**Response:** `Content-Type: text/html`, `200 OK`
+
+---
+
+### 7.5 Health & Readiness
+
+Used by orchestrators (Kubernetes, ECS, etc.) to determine whether the service is ready to handle traffic. The endpoint becomes available immediately at container start; its status reflects the current startup validation phase.
+
+```sh
+GET /api/v1/health
+```
+
+| Status | HTTP Code | Condition |
+| --- | --- | --- |
+| `ok` | `200 OK` | Startup validation complete — service is ready |
+| `starting` | `503 Service Unavailable` | Startup validation still in progress |
+| `error` | `503 Service Unavailable` | A critical failure occurred during startup |
+
+---
+
+### 7.6 Caching & Response
+
+Responses are **lazily cached in-memory and on disk** within the container. On first request:
+
+1. Load YAML sources for the requested library/version/section
 2. Apply fallback strategy if needed
-3. Cache result and return
+3. Cache the transformed result and return
 
-Because source data is immutable, cached entries never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
+The cache is persisted to disk but requires no external docker volume. It will be reloaded lazily into memory from disk after container restarts. Because source data is immutable, cached entries never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
 
 ```text
 Cache-Control: public, max-age=31536000, immutable
 ```
 
-### 7.4 Error Codes
+---
 
-| Code | Meaning |
-| --- | --- |
-| `404` | Library, version, section, or locale not found |
-| `400` | Unsupported format/extension combination |
-| `500` | Internal transformation failure |
+### 7.7 Error Responses
+
+All error responses use a consistent JSON body:
+
+```json
+{
+  "error": "ERROR_CODE",
+  "message": "A human-readable description of the error."
+}
+```
+
+| HTTP Code | `error` value | Meaning |
+| --- | --- | --- |
+| `400` | `BAD_REQUEST` | Malformed request (e.g. missing file field, invalid zip) |
+| `400` | `UNSUPPORTED_FORMAT` | Unsupported format/extension combination |
+| `404` | `NOT_FOUND` | Library, version, section, or locale not found |
+| `500` | `INTERNAL_ERROR` | Internal transformation failure |
 
 ---
 
