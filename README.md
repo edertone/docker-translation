@@ -29,7 +29,7 @@ Translations are uploaded and stored in a Docker volume:
 | `section` | Functional grouping within a library | `login`, `checkout` |
 | `locale.yaml` | Translations for a single locale | `en-US.yaml` |
 
-**Library naming:** Library names must match `[a-z0-9][a-z0-9-]*` — lowercase letters, digits, and hyphens only. Must begin with a letter or digit.
+**Library and section naming:** Lowercase letters, digits, and hyphens only. Must begin and end with a letter or digit.
 
 **Example layout:**
 
@@ -48,7 +48,7 @@ Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once p
 | Change type | Bump |
 | --- | --- |
 | Removed/renamed keys, changed placeholders | MAJOR |
-| New keys added | MINOR |
+| New keys, new section or new locale added | MINOR |
 | Wording fixes only | PATCH |
 
 ---
@@ -57,11 +57,11 @@ Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once p
 
 ### 4.1 Keys
 
-Flat dot-notation strings stored as **top-level YAML keys** (no nesting):
+Keys must be declared with hyphens as word separator characters:
 
 ```yaml
 login: "Login"
-sign.in: "Sign in"
+sign-in: "Sign in"
 ```
 
 ### 4.2 Placeholders
@@ -69,8 +69,8 @@ sign.in: "Sign in"
 Use ICU MessageFormat syntax. Placeholders must be consistent across all locales for a given key:
 
 ```yaml
-hello.username: "Hello {name}"
-user.unread: "{count, plural, one {# message} other {# messages}}"
+hello-username: "Hello {name}"
+user-unread: "{count, plural, one {# message} other {# messages}}"
 ```
 
 ### 4.3 Encoding
@@ -96,7 +96,7 @@ on_missing_translation: "fallback_by_priority"
 | Mode | Behavior |
 | --- | --- |
 | `error` | Reject the entire library at upload time if any locale in any section is missing keys defined by the primary locale |
-| `fallback_by_priority` | Replace missing value with the first match down the priority list |
+| `fallback_by_priority` | Replace missing value with the first match down the priority list (at GET request time). It traverses the locale_priority array from index 0 to N. The first locale containing the key is used. |
 | `return_key` | Replace missing value with the raw key name (e.g. `"login.title"`) |
 | `return_empty` | Replace missing value with `""` |
 
@@ -106,15 +106,16 @@ The **first entry** in `locale_priority` is the primary locale. Its keys define 
 
 ## 6. Validation
 
-Runs at **container startup** (for all already-stored library versions) and on each **upload API call** (for the incoming version only). A failed check logs a CRITICAL error and prevents the version from loading. **No validation occurs at request time.**
+Runs at **container startup** (for all already-stored library versions) and on each **upload API call** (for the incoming versions only). A failed check logs a CRITICAL error, logs the problem and marks the library version as UNAVAILABLE in memory. **No validation occurs at request time.**
 
 | Check | Always | Only when `on_missing_translation: error` |
 | --- | --- | --- |
 | YAML 1.2 strict syntax (prevents boolean casting of `no`, `true`) | ✓ | |
-| Flat dot-notation key format | ✓ | |
+| hyphens and alphanumeric lowercase key format | ✓ | |
 | Placeholder consistency across locales | ✓ | |
 | No orphan keys in non-primary locales | ✓ | |
 | 100% key completeness across all locales and sections | | ✓ |
+| No duplicate keys are allowed across different sections within the same library | ✓ | |
 
 ---
 
@@ -133,13 +134,12 @@ POST /api/v1/upload
 Content-Type: multipart/form-data
 ```
 
-Uploads one or more versioned libraries to the service. The request body must include a `file` field containing a `.zip` archive. The zip must mirror the storage structure defined in [Section 2](#2-storage-structure)
-
-A zip may contain multiple library versions. Each library+version is validated and stored as an independent unit but if one fails, all the zip file fails and nothing is imported.
-
-If all libraries can be imported, a standard 200 response is given.
-
-If the request itself is malformed (missing `file` field, invalid zip), a `400 Bad Request` is returned using the [standard error response](#77-error-responses).
+- Uploads one or more versioned libraries to the service. The request body must include a `file` field containing a `.zip` archive. The zip must mirror the storage structure defined in [Section 2](#2-storage-structure)
+- A zip may contain multiple library versions. All zip contents are validated before being stored. If a single library fails validation, nothing is imported and a `422 UNPROCESSABLE_ENTITY` is returned using the [standard error response](#77-error-responses).
+- Trying to upload a library with a version that already exists will cause an upload failure.
+- If all libraries can be imported, a standard 200 response is given: {"status": "success", "imported_libraries": ["users/1.0.0"]}
+- If the request itself is malformed (missing `file` field, invalid zip), a `400 Bad Request` is returned using the [standard error response](#77-error-responses).
+- Upload requests are authenticated with Authorization: Bearer <STATIC_TOKEN>
 
 ---
 
@@ -155,6 +155,8 @@ GET /api/v1/lib/{library}/{version}/{format}/{locale}/{section1},{section2},...,
 # Get translations for a specific locale from an entire library version
 GET /api/v1/lib/{library}/{version}/{format}/{locale}.{extension}
 ```
+
+Note: Merging sections will generate a single file with all the combined keys from the original sections.
 
 **Examples:**
 
@@ -173,17 +175,17 @@ GET /api/v1/lib/users/1.0.0/android/en-US.xml
 
 | `format` | Valid `extension` | Notes |
 | --- | --- | --- |
-| `android` | `.xml`, `.kt`, `.properties` | `.kt` targets Jetpack Compose (type-safe string accessors) |
+| `android` | `.xml` | |
 | `ios` | `.strings`, `.xcstrings` | |
 | `json` | `.json` | |
-| `icu` | `.json` | |
 | `gettext` | `.po` | |
+| `java` | `.properties` | |
 
 ---
 
 ### 7.4 Catalog
 
-Returns a human-readable HTML page listing all stored libraries, their published versions, and for each version: the available sections and supported locales. It also gives information about missing keys or inconsistent state.
+Returns a human-readable HTML page listing all stored libraries, their published versions, and for each version: the available sections and supported locales. It also gives information about missing keys based on fallback_by_priority policy.
 
 ```sh
 GET /api/v1/catalog
@@ -195,17 +197,12 @@ GET /api/v1/catalog
 
 ### 7.5 Health & Readiness
 
-Used by orchestrators (Kubernetes, ECS, etc.) to determine whether the service is ready to handle traffic. The endpoint becomes available immediately at container start; its status reflects the current startup validation phase.
+Used by orchestrators (Kubernetes, ECS, etc.) to determine whether the service is ready to handle traffic. The endpoints become available immediately at container start; their status reflects the current startup validation phase.
 
 ```sh
-GET /api/v1/health
+GET /api/v1/health/live # always returns 200 immediately
+GET /api/v1/health/ready # returns 503 until startup validation is done. Then returns 200 OK, even if some libraries failed validation and were marked UNAVAILABLE.
 ```
-
-| Status | HTTP Code | Condition |
-| --- | --- | --- |
-| `ok` | `200 OK` | Startup validation complete — service is ready |
-| `starting` | `503 Service Unavailable` | Startup validation still in progress |
-| `error` | `503 Service Unavailable` | A critical failure occurred during startup |
 
 ---
 
@@ -213,11 +210,14 @@ GET /api/v1/health
 
 Responses are **lazily cached in-memory and on disk** within the container. On first request:
 
-1. Load YAML sources for the requested library/version/section
-2. Apply fallback strategy if needed
-3. Cache the transformed result and return
+1. If multiple sections are requested at once, sort them alphabetically to prevent redundant cache values
+2. Load YAML sources for the requested library/version/section
+3. Apply fallback strategy if needed
+4. Cache the transformed result and return
 
-The cache is persisted to disk but requires no external docker volume. It will be reloaded lazily into memory from disk after container restarts. Because source data is immutable, cached entries never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
+- The cache is persisted to disk on an external docker volume (exclusively dedicated for cache storage). It will be reloaded lazily into memory from disk after container restarts. 
+- Source data is immutable, cached entries never expire. A maximum cache size is defined as a docker environment variable, with a default value of 10GB with an LRU (Least Recently Used) eviction policy for the disk cache.
+- HTTP responses include aggressive headers to leverage browser and CDN caching:
 
 ```text
 Cache-Control: public, max-age=31536000, immutable
@@ -240,17 +240,25 @@ All error responses use a consistent JSON body:
 | --- | --- | --- |
 | `400` | `BAD_REQUEST` | Malformed request (e.g. missing file field, invalid zip) |
 | `400` | `UNSUPPORTED_FORMAT` | Unsupported format/extension combination |
+| `401` | `UNAUTHORIZED` | Missing or invalid Bearer token on upload request |
 | `404` | `NOT_FOUND` | Library, version, section, or locale not found |
+| `409` | `CONFLICT` | Uploaded a library version that already existed |
+| `422` | `UNPROCESSABLE_ENTITY` | Translation validation failures |
 | `500` | `INTERNAL_ERROR` | Internal transformation failure |
+| `503` | `SERVICE_UNAVAILABLE` | Library exists but is marked UNAVAILABLE due to corruption/validation failure |
 
 ---
 
 ## 8. Observability
 
-The service emits:
+The service emits logs to stdout and stderr:
 
-- Request latency metrics
-- Cache hit/miss ratio
 - Artifact generation count
 - Validation failures (ingestion)
 - Missing translation warnings (when any fallback mode is active)
+- Errors
+
+The service emits Prometheus metrics at the /metrics endpoint:
+
+- Cache hit/miss ratio
+- Request latency metrics
