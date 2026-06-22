@@ -66,11 +66,11 @@ sign-in: "Sign in"
 
 ### 4.2 Placeholders
 
-Use ICU MessageFormat syntax. Placeholders must be consistent across all locales for a given key:
+Use ICU MessageFormat syntax, but restricted **only to simple variable placeholders**. Complex logic (such as plurals or select statements) is explicitly not allowed. Placeholders must be consistent across all locales for a given key:
 
 ```yaml
 hello-username: "Hello {name}"
-user-unread: "{count, plural, one {# message} other {# messages}}"
+cart-count: "You have {count} items in your cart."
 ```
 
 ### 4.3 Encoding
@@ -97,7 +97,7 @@ on_missing_translation: "fallback_by_priority"
 | --- | --- |
 | `error` | Reject the entire library at upload time if any locale in any section is missing keys defined by the primary locale |
 | `fallback_by_priority` | Replace missing value with the first match down the priority list (at GET request time). It traverses the locale_priority array from index 0 to N. The first locale containing the key is used. |
-| `return_key` | Replace missing value with the raw key name (e.g. `"login.title"`) |
+| `return_key` | Replace missing value with the raw key name (e.g. `"login"`) |
 | `return_empty` | Replace missing value with `""` |
 
 The **first entry** in `locale_priority` is the primary locale. Its keys define the master key set. Non-primary locales must not contain keys absent from the primary locale — orphan keys will cause the version to be rejected at upload time.
@@ -112,6 +112,7 @@ Runs at **container startup** (for all already-stored library versions) and on e
 | --- | --- | --- |
 | YAML 1.2 strict syntax (prevents boolean casting of `no`, `true`) | ✓ | |
 | hyphens and alphanumeric lowercase key format | ✓ | |
+| No complex ICU logic (plurals, select) in placeholders (only simple variables allowed) | ✓ | |
 | Placeholder consistency across locales | ✓ | |
 | No orphan keys in non-primary locales | ✓ | |
 | 100% key completeness across all locales and sections | | ✓ |
@@ -137,9 +138,9 @@ Content-Type: multipart/form-data
 - Uploads one or more versioned libraries to the service. The request body must include a `file` field containing a `.zip` archive. The zip must mirror the storage structure defined in [Section 2](#2-storage-structure)
 - A zip may contain multiple library versions. All zip contents are validated before being stored. If a single library fails validation, nothing is imported and a `422 UNPROCESSABLE_ENTITY` is returned using the [standard error response](#77-error-responses).
 - Trying to upload a library with a version that already exists will cause an upload failure.
-- If all libraries can be imported, a standard 200 response is given: {"status": "success", "imported_libraries": ["users/1.0.0"]}
+- If all libraries can be imported, a standard 200 response is given: `{"status": "success", "imported_libraries": ["users/1.0.0"]}`
 - If the request itself is malformed (missing `file` field, invalid zip), a `400 Bad Request` is returned using the [standard error response](#77-error-responses).
-- Upload requests are authenticated with Authorization: Bearer <STATIC_TOKEN>
+- Upload requests are authenticated with `Authorization: Bearer <STATIC_TOKEN>`
 
 ---
 
@@ -179,7 +180,6 @@ GET /api/v1/lib/users/1.0.0/android/en-US.xml
 | `ios` | `.strings`, `.xcstrings` | |
 | `json` | `.json` | |
 | `gettext` | `.po` | |
-| `java` | `.properties` | |
 
 ---
 
@@ -215,7 +215,7 @@ Responses are **lazily cached in-memory and on disk** within the container. On f
 3. Apply fallback strategy if needed
 4. Cache the transformed result and return
 
-- The cache is persisted to disk on an external docker volume (exclusively dedicated for cache storage). It will be reloaded lazily into memory from disk after container restarts. 
+- The cache is persisted to disk on an external docker volume (exclusively dedicated for cache storage). It will be reloaded lazily into memory from disk after container restarts.
 - Source data is immutable, cached entries never expire. A maximum cache size is defined as a docker environment variable, with a default value of 10GB with an LRU (Least Recently Used) eviction policy for the disk cache.
 - HTTP responses include aggressive headers to leverage browser and CDN caching:
 
