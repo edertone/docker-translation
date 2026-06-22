@@ -8,17 +8,18 @@ A containerized microservice providing a centralized, versioned translation sour
 
 - Canonical YAML storage — single source of truth
 - Immutable published versions — guaranteed determinism
-- Platform-agnostic output — Android, iOS, Web, backend formats
+- Platform-agnostic output — Android, iOS, Web, backend native formats, plus custom user-defined formats via templates
 - Library-scoped — independent lifecycle per domain
 
 ---
 
 ## 2. Storage Structure
 
-Translations are uploaded and stored in a Docker volume:
+Translations and custom templates are uploaded and stored in a Docker volume. Templates must live at the root of the library version to prevent folder name collisions with translation sections.
 
 ```text
 <docker_volume>/library-name/version/config.yaml
+<docker_volume>/library-name/version/custom-format.hbs
 <docker_volume>/library-name/version/section/locale.yaml
 ```
 
@@ -28,6 +29,7 @@ Translations are uploaded and stored in a Docker volume:
 | `version` | Semantic version | `1.0.0`, `2.1.0` |
 | `section` | Functional grouping within a library | `login`, `checkout` |
 | `locale.yaml` | Translations for a single locale | `en-US.yaml` |
+| `*.hbs` | Optional Handlebars templates for custom formats | `env-format.hbs` |
 
 **Library and section naming:** Lowercase letters, digits, and hyphens only. Must begin and end with a letter or digit.
 
@@ -35,6 +37,7 @@ Translations are uploaded and stored in a Docker volume:
 
 ```text
 users/1.0.0/config.yaml
+users/1.0.0/env-format.hbs
 users/1.0.0/login/en-US.yaml
 users/1.0.0/login/es-ES.yaml
 ```
@@ -47,8 +50,8 @@ Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once p
 
 | Change type | Bump |
 | --- | --- |
-| Removed/renamed keys, changed placeholders | MAJOR |
-| New keys, new section or new locale added | MINOR |
+| Removed/renamed keys, changed placeholders, modified templates | MAJOR |
+| New keys, new section, new locale, or new custom format added | MINOR |
 | Wording fixes only | PATCH |
 
 ---
@@ -77,6 +80,34 @@ cart-count: "You have {count} items in your cart."
 
 All files must be UTF-8 encoded (without BOM recommended, with full Unicode support).
 
+### 4.4 Custom Formats via Templates
+
+To support arbitrary application requirements, custom formats can be defined using Handlebars (`.hbs`) templates. The microservice resolves fallbacks, flattens the requested sections, and injects the following JSON data model into the template at request time:
+
+```json
+{
+  "library": "users",
+  "version": "1.0.0",
+  "locale": "en-US",
+  "sections": ["login", "checkout"],
+  "translations": [
+    { "key": "login", "value": "Login" },
+    { "key": "sign-in", "value": "Sign in" }
+  ]
+}
+```
+
+**Example Template (`env-format.hbs`):**
+
+```handlebars
+# Generated translations for {{library}} - {{locale}}
+# Sections: {{join sections ", "}}
+
+{{#each translations}}
+{{key}}="{{value}}"
+{{/each}}
+```
+
 ---
 
 ## 5. Library Configuration (`config.yaml`)
@@ -84,11 +115,14 @@ All files must be UTF-8 encoded (without BOM recommended, with full Unicode supp
 Required at the root of each versioned library. A missing or malformed file causes the version to be rejected at upload time.
 
 ```yaml
-locale_priority:
-  - "en-US"   # Primary locale — defines the master key set
-  - "es-ES"
-  - "ca-ES"
-on_missing_translation: "fallback_by_priority"
+base_locale: "en-US" # Primary locale — defines the master key set  
+on_missing_translation: "fallback"
+
+# Optional custom formats bindings
+custom_formats:
+  - name: "env"               # The {format} used in the API URL
+    extension: ".env"         # The {extension} used in the API URL
+    template: "env-format.hbs" # The Handlebars template at the root of the version
 ```
 
 **`on_missing_translation` modes:**
@@ -96,11 +130,11 @@ on_missing_translation: "fallback_by_priority"
 | Mode | Behavior |
 | --- | --- |
 | `error` | Reject the entire library at upload time if any locale in any section is missing keys defined by the primary locale |
-| `fallback_by_priority` | Replace missing value with the first match down the priority list (at GET request time). It traverses the locale_priority array from index 0 to N. The first locale containing the key is used. |
+| `fallback` | Replace missing value with the key match from base_locale |
 | `return_key` | Replace missing value with the raw key name (e.g. `"login"`) |
 | `return_empty` | Replace missing value with `""` |
 
-The **first entry** in `locale_priority` is the primary locale. Its keys define the master key set. Non-primary locales must not contain keys absent from the primary locale — orphan keys will cause the version to be rejected at upload time.
+The base_locale field defines the master key set. Non-primary locales must not contain keys absent from it — orphan keys will cause the version to be rejected at upload time.
 
 ---
 
@@ -115,8 +149,11 @@ Runs at **container startup** (for all already-stored library versions) and on e
 | No complex ICU logic (plurals, select) in placeholders (only simple variables allowed) | ✓ | |
 | Placeholder consistency across locales | ✓ | |
 | No orphan keys in non-primary locales | ✓ | |
+| No duplicate keys are allowed across different sections within the same library version | ✓ | |
+| Template files referenced in `config.yaml` exist at the library root | ✓ | |
+| Template syntax compilation (valid Handlebars logic) | ✓ | |
+| Custom format names do not collide with native formats (`android`, `ios`, `json`, `gettext`) | ✓ | |
 | 100% key completeness across all locales and sections | | ✓ |
-| No duplicate keys are allowed across different sections within the same library | ✓ | |
 
 ---
 
@@ -162,14 +199,14 @@ Note: Merging sections will generate a single file with all the combined keys fr
 **Examples:**
 
 ```sh
-# Android XML — English translations from the login section of users v1.0.0
+# Native Android XML — English translations from the login section of users v1.0.0
 GET /api/v1/lib/users/1.0.0/android/en-US/login.xml
 
-# Android XML — English translations from the login and checkout sections of users v1.0.0
+# Native Android XML — login and checkout sections
 GET /api/v1/lib/users/1.0.0/android/en-US/login,checkout.xml
 
-# Android XML — all English translations from every section of users v1.0.0
-GET /api/v1/lib/users/1.0.0/android/en-US.xml
+# Custom 'env' format (defined in config.yaml) — login and checkout sections
+GET /api/v1/lib/users/1.0.0/env/en-US/login,checkout.env
 ```
 
 **Supported formats and extensions:**
@@ -180,12 +217,13 @@ GET /api/v1/lib/users/1.0.0/android/en-US.xml
 | `ios` | `.strings`, `.xcstrings` | |
 | `json` | `.json` | |
 | `gettext` | `.po` | |
+| *(custom)* | *(custom)* | Dynamically resolved from `custom_formats` block in `config.yaml` |
 
 ---
 
 ### 7.4 Catalog
 
-Returns a human-readable HTML page listing all stored libraries, their published versions, and for each version: the available sections and supported locales. It also gives information about missing keys based on fallback_by_priority policy.
+Returns a human-readable HTML page listing all stored libraries, their published versions, and for each version: the available sections, supported locales, and supported custom formats. It also gives information about missing keys (regardless of on_missing_translation setting).
 
 ```sh
 GET /api/v1/catalog
@@ -208,16 +246,15 @@ GET /api/v1/health/ready # returns 503 until startup validation is done. Then re
 
 ### 7.6 Caching & Response
 
-Responses are **lazily cached in-memory and on disk** within the container. On first request:
+Responses are **lazily cached in-memory** within the container. On first request:
 
 1. If multiple sections are requested at once, sort them alphabetically to prevent redundant cache values
 2. Load YAML sources for the requested library/version/section
 3. Apply fallback strategy if needed
-4. Cache the transformed result and return
+4. Compile native output OR process custom Handlebars template
+5. Cache the transformed result and return
 
-- The cache is persisted to disk on an external docker volume (exclusively dedicated for cache storage). It will be reloaded lazily into memory from disk after container restarts.
-- Source data is immutable, cached entries never expire. A maximum cache size is defined as a docker environment variable, with a default value of 10GB with an LRU (Least Recently Used) eviction policy for the disk cache.
-- HTTP responses include aggressive headers to leverage browser and CDN caching:
+- Source data is immutable, cached entries never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
 
 ```text
 Cache-Control: public, max-age=31536000, immutable
@@ -239,12 +276,12 @@ All error responses use a consistent JSON body:
 | HTTP Code | `error` value | Meaning |
 | --- | --- | --- |
 | `400` | `BAD_REQUEST` | Malformed request (e.g. missing file field, invalid zip) |
-| `400` | `UNSUPPORTED_FORMAT` | Unsupported format/extension combination |
+| `400` | `UNSUPPORTED_FORMAT` | Unsupported format/extension combination (not a native format, and not defined in `config.yaml`) |
 | `401` | `UNAUTHORIZED` | Missing or invalid Bearer token on upload request |
 | `404` | `NOT_FOUND` | Library, version, section, or locale not found |
 | `409` | `CONFLICT` | Uploaded a library version that already existed |
-| `422` | `UNPROCESSABLE_ENTITY` | Translation validation failures |
-| `500` | `INTERNAL_ERROR` | Internal transformation failure |
+| `422` | `UNPROCESSABLE_ENTITY` | Translation or template validation failures |
+| `500` | `INTERNAL_ERROR` | Internal transformation failure (e.g. Handlebars rendering error) |
 | `503` | `SERVICE_UNAVAILABLE` | Library exists but is marked UNAVAILABLE due to corruption/validation failure |
 
 ---
@@ -253,7 +290,6 @@ All error responses use a consistent JSON body:
 
 The service emits logs to stdout and stderr:
 
-- Artifact generation count
 - Validation failures (ingestion)
 - Missing translation warnings (when any fallback mode is active)
 - Errors
