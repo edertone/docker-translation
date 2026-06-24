@@ -2,60 +2,55 @@
 
 ## 1. Overview
 
-A containerized microservice providing a centralized translation source of truth. Distributed as a standalone Docker container, it is ready to be deployed via Docker Compose anywhere.
+A containerized microservice providing a centralized translation source of truth. Distributed as a standalone Docker container, it is ready to be deployed via Docker Compose or orchestrated environments (Kubernetes, ECS).
 
-The service provides a live "working" state for active translation editing through a built-in UI, and allows freezing deterministic, immutable published versions for production runtime. It exposes an API that retrieves localized text in multiple native formats (Android, iOS, Web, backend) and user-defined custom templates.
+The service provides "working drafts" for active translation editing through a built-in UI, and allows freezing deterministic, immutable published releases for production runtime. It exposes an API that retrieves localized text in multiple native formats (Android, iOS, Web, backend) and user-defined custom templates.
 
 **Core principles:**
 
 - **Technology Stack:** Java 21, Spring Boot 3.2+, fully containerized.
-- **Canonical YAML storage:** Single source of truth.
-- **Live & Frozen states:** Actively edit the latest state; freeze deterministic versions for production.
-- **Platform-agnostic output:** Native formats plus custom Handlebars templates.
-- **File-based Generation:** Artifacts are generated on demand and stored on disk (basic caching).
+- **Canonical YAML storage:** Single source of truth backed by a distributed file system or object store.
+- **Draft & Release states:** Actively edit draft branches (e.g., `main`); freeze deterministic releases (e.g., `1.0.0`) for production.
+- **Platform-agnostic output:** Native formats (including plurals mapping) plus custom Handlebars templates.
+- **File-based Generation:** Artifacts are generated on demand, cached safely using atomic operations, and served rapidly.
 
 ---
 
 ## 2. Storage Structure
 
-Translations, templates, and internally generated files are stored in a Docker volume. The structure isolates the `latest` working state from `frozen` versions, and maintains a `.generated` directory for compiled artifacts.
+Translations, templates, and internally generated files are stored in a centralized storage volume (e.g., AWS EFS, Kubernetes `ReadWriteMany` PV, or S3-compatible backend) to prevent split-brain issues across multiple container replicas.
+
+The structure isolates `drafts` (working states) from `releases` (frozen versions), and maintains a `.generated` directory for compiled artifacts.
 
 ```text
-<docker_volume>/library-name/latest/config.yaml
-<docker_volume>/library-name/latest/custom-format.hbs
-<docker_volume>/library-name/latest/section/locale.yaml
-<docker_volume>/library-name/1.0.0/...
-<docker_volume>/library-name/1.0.0/.generated/...
-<docker_volume>/library-name/2.0.0/...
+<storage>/library-name/drafts/main/config.yaml
+<storage>/library-name/drafts/main/custom-format.hbs
+<storage>/library-name/drafts/main/login/en-US.yaml
+<storage>/library-name/releases/1.0.0/...
+<storage>/library-name/releases/1.0.0/.generated/...
+<storage>/library-name/drafts/1.0.x/...  # Hotfix branches
 ```
 
 **Library and section naming:** Lowercase letters, digits, and hyphens only. Must begin and end with a letter or digit.
-**Example layout:**
-
-```text
-users/latest/config.yaml
-users/latest/env-format.hbs
-users/latest/login/en-US.yaml
-users/latest/login/es-ES.yaml
-```
 
 ---
 
 ## 3. Versioning
 
-Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once frozen**.
+Follows Semantic Versioning (MAJOR.MINOR.PATCH). Releases are **immutable once frozen**.
 
 | Change type | Bump |
 | --- | --- |
-| Removed/renamed keys, changed placeholders, modified templates | MAJOR |
-| New keys, new section, new locale, or new custom format added | MINOR |
-| Wording fixes only | PATCH |
+| Removed/renamed keys, modified templates | MAJOR |
+| New keys, new section, new locale, or custom format | MINOR |
+| Wording fixes or pluralization tweaks only | PATCH |
 
 ### 3.1 Workflow
 
-1. **Active Development (`latest`):** All edits via the Dashboard happen on the `latest` state. Requests targeting the `latest` identifier are **always regenerated** on every API call to immediately reflect updates.
-2. **Freezing Versions:** A specific endpoint freezes the `latest` state (if valid) into an immutable semantic version (e.g., `1.0.0`). Once frozen, these versions are static.
-3. **Artifact Storage:** When a frozen version is requested, the service checks the internal `/generated/` path. If the requested file exists, it is served directly. If not, it is generated, saved to the path, and served.
+1. **Active Development:** Edits via the UI typically happen on the `drafts/main` branch. Requests targeting a draft branch are **dynamically generated** on API calls to reflect immediate updates.
+2. **Freezing Releases:** A specific endpoint freezes a valid draft state into an immutable release version (e.g., `1.0.0`). Once frozen, releases are static.
+3. **Hotfixing (Branching):** If `1.0.0` is in production but `main` has already moved to `2.0.0`, developers can branch `releases/1.0.0` into a new draft `drafts/1.0.x`, apply the fix, and freeze as `1.0.1`.
+4. **Artifact Storage:** When a release is requested, the service checks the internal `.generated/` path. If missing, it generates the file using **atomic write operations** (writing to `.tmp` and renaming) to prevent race conditions, then serves it.
 
 ---
 
@@ -66,13 +61,13 @@ Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once f
 Keys must be declared with hyphens as word separator characters (`sign-in`, `login-button`).
 **Duplicate keys are allowed** as long as they reside in *different* sections.
 
-### 4.2 Placeholders
+### 4.2 Placeholders & Plurals
 
-Use ICU MessageFormat syntax, but restricted **only to simple variable placeholders**. Complex logic (such as plurals or select statements) is explicitly not allowed. Placeholders must be consistent across all locales for a given key:
+Uses ICU MessageFormat syntax. Standard variables and **Plurals** are explicitly supported and mapped to native equivalents at generation time (e.g., Android `<plurals>` and iOS `.stringsdict` / `.xcstrings`).
 
 ```yaml
 hello-username: "Hello {name}"
-cart-count: "You have {count} items in your cart."
+cart-count: "{count, plural, =0 {Cart is empty} one {1 item in cart} other {{count} items in cart}}"
 ```
 
 ### 4.3 Custom Formats via Templates
@@ -95,7 +90,7 @@ To support arbitrary application requirements, custom formats can be defined usi
 
 ```handlebars
 # Generated translations for {{library}} - {{locale}}
-# Sections: {{join sections ", "}}
+# Section: {{section}}
 
 {{#each translations}}
 {{key}}="{{value}}"
@@ -106,7 +101,7 @@ To support arbitrary application requirements, custom formats can be defined usi
 
 ## 5. Library Configuration (`config.yaml`)
 
-Required at the root of the library version. A missing or malformed file causes the version to be rejected at freeze time.
+Required at the root of every library branch/release. A missing or malformed file causes the draft to be rejected at freeze time.
 
 ```yaml
 base_locale: "en-US" # Primary locale — defines the master key set  
@@ -128,25 +123,26 @@ custom_formats:
 | `return_key` | Replace missing value with the raw key name (e.g. `"login"`) |
 | `return_empty` | Replace missing value with `""` |
 
-The base_locale field defines the master key set. Non-primary locales must not contain keys absent from it — orphan keys will cause the version to be rejected at upload time.
+The base_locale field defines the master key set. Non-primary locales must not contain keys absent from it — orphan keys will cause the version to be rejected at freeze time.
 
 ---
 
 ## 6. Validation
 
-Validation runs when saving edits via the Dashboard, and critically when **freezing** a version. If a frozen version fails validation, the freeze operation is aborted. **No validation occurs at request time.**
+To prevent workflow gridlock while ensuring production stability, validation rules are split into two phases:
 
-| Check | Always | Only when `on_missing_translation: error` |
-| --- | --- | --- |
-| YAML 1.2 strict syntax (prevents boolean casting of `no`, `true`) | ✓ | |
-| hyphens and alphanumeric lowercase key format | ✓ | |
-| No complex ICU logic (plurals, select) in placeholders (only simple variables allowed) | ✓ | |
-| Placeholder consistency across locales | ✓ | |
-| No orphan keys in non-primary locales (only applied when freezing) | ✓ | |
-| Template files referenced in `config.yaml` exist at the library root | ✓ | |
-| Template syntax compilation (valid Handlebars logic) | ✓ | |
-| Custom format names do not collide with native formats (`android`, `ios`, `json`, `gettext`) | ✓ | |
-| 100% key completeness across all locales and sections (only applied when freezing) | | ✓ |
+**Phase 1:** File-Level (Runs on Save/Edit API Calls)
+
+- YAML 1.2 strict syntax (prevents boolean casting of `no`, `true`).
+- Hyphenated, alphanumeric lowercase key format.
+- Valid ICU MessageFormat syntax (plurals/variables).
+
+**Phase 2:** Cross-File / Integrity (Runs strictly on Freeze/Publish)
+
+- Placeholder consistency across locales (e.g., `es-ES` must contain the same variables as `en-US`).
+- No orphan keys in non-primary locales (keys not present in `base_locale`).
+- Template files referenced in `config.yaml` exist and compile successfully.
+- If `on_missing_translation: error` is set, verifies 100% key completeness across all locales.
 
 ---
 
@@ -155,11 +151,11 @@ Validation runs when saving edits via the Dashboard, and critically when **freez
 ### 7.1 Base URL & Authentication
 
 `/api/v1`
-API write/freeze requests are authenticated with `Authorization: Bearer <STATIC_TOKEN>`.
+The API requires standard OIDC / JWT `Authorization: Bearer <TOKEN>` to track user identity for audit logs. Service accounts can use Long-Lived Personal Access Tokens.
 
 ---
 
-### 7.2 Dashboard & Management UI
+### 7.2 Dashboard UI & CRUD API
 
 ```sh
 GET /api/v1/dashboard
@@ -174,48 +170,57 @@ Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrato
 - **Publish (freeze)** library versions.
 - Delete existing libraries or sections.
 
+**Management APIs:**
+The UI interacts with the following backend APIs to modify working drafts. Requests utilize `ETag` headers to implement optimistic locking, preventing concurrent edit overwrites (`412 Precondition Failed`).
+
+- `POST /api/v1/lib/{library}/branches/{branch}` (Create new branch from release or main)
+- `PUT /api/v1/lib/{library}/drafts/{branch}/{section}/{locale}` (Update translations, requires `If-Match: "etag-hash"`)
+- `PUT /api/v1/lib/{library}/drafts/{branch}/config` (Update config/templates)
+
 ---
 
-### 7.3 Freeze Library Version
+### 7.3 Freeze Library Version (Publish)
 
 ```sh
 POST /api/v1/lib/{library}/freeze
 Content-Type: application/json
 ```
-**Payload:** `{"version": "1.0.0"}`
-Validates the latest working state. If validation passes, copies the latest state into the `version` directory. Returns `422 UNPROCESSABLE_ENTITY` if validation (`strict_validation` or base constraints) fails.
+
+**Payload:** `{"source_branch": "main", "version": "1.0.0"}`
+
+Validates the draft state (Phase 2 Validation). If successful, clones the draft into the immutable `version` release. Returns `422 UNPROCESSABLE_ENTITY` with a validation report if it fails.
+
+*(Optional: `DELETE /api/v1/lib/{library}/releases/{version}` soft-deletes/deprecates a broken release.)*
 
 ---
 
 ### 7.4 Retrieve Translations
 
-`{version_or_latest}` can be an explicit frozen version (e.g., `1.0.0`) or the literal string `latest`.
+`{ref}` can be an explicit frozen version (e.g., `1.0.0`) or a draft branch (e.g., `drafts/main`).
 
 **A) Single Section Request:**
 Returns the natively formatted file for the requested section.
 
 ```sh
-GET /api/v1/lib/{library}/{version_or_latest}/{format}/{locale}/{section}.{extension}
+GET /api/v1/lib/{library}/{ref}/{format}/{locale}/{section}.{extension}
 ```
 
 **Supported formats and extensions:**
 
-| `format` | Valid `extension` | Notes |
+| `format` | Valid `extension` | Output Handled |
 | --- | --- | --- |
-| `android` | `.xml` | |
-| `ios` | `.strings`, `.xcstrings` | |
-| `json` | `.json` | |
-| `gettext` | `.po` | |
-| *(custom)* | *(custom)* | Dynamically resolved from `custom_formats` block in `config.yaml` |
-
-*Example:* `GET /api/v1/lib/users/latest/android/en-US/login.xml`
+| `android` | `.xml` | Translates ICU plurals to `<plurals>` |
+| `ios` | `.strings`, `.xcstrings` | Generates associated `.stringsdict` for plurals |
+| `json` | `.json` | Raw ICU strings |
+| `gettext` | `.po` | Standard Gettext mapping |
+| *(custom)* | *(custom)* | Dynamically resolved via `config.yaml` |
 
 **B) Multi-Section or Full Library Request:**
 When requesting multiple sections OR the entire library, the extension **MUST be `.json`**.
 
 ```sh
-GET /api/v1/lib/{library}/{version_or_latest}/{format}/{locale}/{section1},{section2}.json
-GET /api/v1/lib/{library}/{version_or_latest}/{format}/{locale}.json
+GET /api/v1/lib/{library}/{ref}/{format}/{locale}/{section1},{section2}.json
+GET /api/v1/lib/{library}/{ref}/{format}/{locale}.json
 ```
 
 Requesting any other extension (e.g., `.xml`, `.strings`) for multiple sections will return a `400 BAD_REQUEST`.
@@ -232,19 +237,14 @@ The response encapsulates each requested section, mapping the section name to it
 
 ---
 
-### 7.5 File Generation & Storage
+### 7.5 File Generation, Storage & Caching
 
-To guarantee efficiency and predictability, the service relies on disk-based file storage rather than in-memory caching. More efficient caching mechanisms like a CDN can be used to further improve performance:
+- **For Frozen Releases (`1.0.0`):**
+   Artifacts are checked against `.generated/`. Missing files are generated using **atomic writes** (`temp-write` -> `rename`) to prevent race conditions during high concurrency.
+   Responses include aggressive caching: `Cache-Control: public, max-age=31536000, immutable`.
 
-- **For Frozen Versions (`1.0.0`, etc.):**
-   Upon receiving a request, the service checks the internal docker volume `.generated/` path. If the requested compiled artifact exists, it is streamed directly. If missing, the service generates the artifact, saves it to the path, and streams it. Since frozen versions are immutable, these generated files never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
-
-```text
-Cache-Control: public, max-age=31536000, immutable
-```
-
-- **For Active Work (`latest`):**
-   Files requested for the `latest` version bypass the generation storage. They are computed dynamically on the fly on every request, ensuring developers always see the absolute latest edits made in the Dashboard.
+- **For Active Drafts (`drafts/main`):**
+   Dynamically computed to ensure the absolute latest edits are served. To prevent CPU exhaustion (DDoS) from heavy requests, the service returns `ETag` headers based on the draft's current commit/hash state, allowing clients to receive `304 Not Modified` without triggering Handlebars compilation.
 
 ---
 
@@ -261,26 +261,25 @@ Standard JSON error bodies:
 
 | HTTP Code | `error` value | Meaning |
 | --- | --- | --- |
-| `400` | `BAD_REQUEST` | Malformed request |
-| `400` | `UNSUPPORTED_FORMAT` | Unsupported format/extension combination. |
-| `401` | `UNAUTHORIZED` | Missing or invalid Bearer token. |
-| `404` | `NOT_FOUND` | Library, version, section, or locale not found. |
+| `400` | `BAD_REQUEST` | Malformed request or unsupported format/extension. |
+| `401` | `UNAUTHORIZED` | Missing or invalid authentication. |
+| `404` | `NOT_FOUND` | Library, ref, section, or locale not found. |
 | `409` | `CONFLICT` | Attempted to freeze to a version string that already exists. |
-| `422` | `UNPROCESSABLE_ENTITY` | Validation failures during a freeze operation. |
+| `412` | `PRECONDITION_FAILED` | ETag mismatch during a PUT request (concurrent edit blocked). |
+| `422` | `UNPROCESSABLE_ENTITY` | Integrity validation failures during a freeze operation. |
 | `500` | `INTERNAL_ERROR` | Internal transformation failure (e.g., I/O write error, Handlebars error). |
 
 ---
 
 ## 8. Observability
 
-**Logging:**
+**Logging & Auditing:**
 
-- Standard output logs via Spring Boot's SLF4J/Logback integration.
-- Warns on missing translation fallbacks; errors on I/O generation failures.
+- Application logs via SLF4J/Logback.
+- **Audit Logs:** All modifications (Keys, Locales, Freeze operations) are logged with the authenticated User's Identity (extracted from JWT) and a timestamp (e.g., `User auth0|123 modified 'login-btn' in drafts/main at 2024-05-10T14:30:00Z`).
 
 **Metrics & Health:**
+Exposed via Spring Boot Actuator (`/actuator`):
 
-Exposed via Spring Boot Actuator (/actuator):
-
-- `/actuator/prometheus`: Disk-based generation metrics, request latency, JVM memory, and garbage collection metrics.
-- `/actuator/health/liveness` & `/actuator/health/readiness`: Standard health probes for orchestrators (Kubernetes, ECS).
+- `/actuator/prometheus`: Disk-based generation metrics, request latency, concurrent edit conflicts (`412`s), JVM memory.
+- `/actuator/health/liveness` & `readiness`: Standard health probes for Kubernetes/ECS integration.
