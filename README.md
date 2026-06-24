@@ -2,51 +2,48 @@
 
 ## 1. Overview
 
-A containerized microservice providing a centralized, versioned translation source of truth. Applications bind to specific, immutable translation versions for runtime determinism. It exposes an API that allows clients to retrieve localized text in multiple formats for different platforms (e.g. Android, iOS, Web, backend systems).
+A containerized microservice providing a centralized translation source of truth. Distributed as a standalone Docker container, it is ready to be deployed via Docker Compose anywhere.
+
+The service provides a live "working" state for active translation editing through a built-in UI, and allows freezing deterministic, immutable published versions for production runtime. It exposes an API that retrieves localized text in multiple native formats (Android, iOS, Web, backend) and user-defined custom templates.
 
 **Core principles:**
 
-- Canonical YAML storage — single source of truth
-- Immutable published versions — guaranteed determinism
-- Platform-agnostic output — Android, iOS, Web, backend native formats, plus custom user-defined formats via templates
-- Library-scoped — independent lifecycle per domain
+- **Technology Stack:** Java 21, Spring Boot 3.2+, fully containerized.
+- **Canonical YAML storage:** Single source of truth.
+- **Live & Frozen states:** Actively edit the latest state; freeze deterministic versions for production.
+- **Platform-agnostic output:** Native formats plus custom Handlebars templates.
+- **File-based Generation:** Artifacts are generated on demand and stored on disk (basic caching).
 
 ---
 
 ## 2. Storage Structure
 
-Translations and custom templates are uploaded and stored in a Docker volume. Templates must live at the root of the library version to prevent folder name collisions with translation sections.
+Translations, templates, and internally generated files are stored in a Docker volume. The structure isolates the `latest` working state from `frozen` versions, and maintains a `.generated` directory for compiled artifacts.
 
 ```text
-<docker_volume>/library-name/version/config.yaml
-<docker_volume>/library-name/version/custom-format.hbs
-<docker_volume>/library-name/version/section/locale.yaml
+<docker_volume>/library-name/latest/config.yaml
+<docker_volume>/library-name/latest/custom-format.hbs
+<docker_volume>/library-name/latest/section/locale.yaml
+<docker_volume>/library-name/1.0.0/...
+<docker_volume>/library-name/1.0.0/.generated/...
+<docker_volume>/library-name/2.0.0/...
 ```
 
-| Segment | Description | Example |
-| --- | --- | --- |
-| `library-name` | Domain grouping | `users`, `billing` |
-| `version` | Semantic version | `1.0.0`, `2.1.0` |
-| `section` | Functional grouping within a library | `login`, `checkout` |
-| `locale.yaml` | Translations for a single locale | `en-US.yaml` |
-| `*.hbs` | Optional Handlebars templates for custom formats | `env-format.hbs` |
-
 **Library and section naming:** Lowercase letters, digits, and hyphens only. Must begin and end with a letter or digit.
-
 **Example layout:**
 
 ```text
-users/1.0.0/config.yaml
-users/1.0.0/env-format.hbs
-users/1.0.0/login/en-US.yaml
-users/1.0.0/login/es-ES.yaml
+users/latest/config.yaml
+users/latest/env-format.hbs
+users/latest/login/en-US.yaml
+users/latest/login/es-ES.yaml
 ```
 
 ---
 
 ## 3. Versioning
 
-Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once published**.
+Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once frozen**.
 
 | Change type | Bump |
 | --- | --- |
@@ -54,18 +51,20 @@ Follows Semantic Versioning (MAJOR.MINOR.PATCH). Versions are **immutable once p
 | New keys, new section, new locale, or new custom format added | MINOR |
 | Wording fixes only | PATCH |
 
+### 3.1 Workflow
+
+1. **Active Development (`latest`):** All edits via the Dashboard happen on the `latest` state. Requests targeting the `latest` identifier are **always regenerated** on every API call to immediately reflect updates.
+2. **Freezing Versions:** A specific endpoint freezes the `latest` state (if valid) into an immutable semantic version (e.g., `1.0.0`). Once frozen, these versions are static.
+3. **Artifact Storage:** When a frozen version is requested, the service checks the internal `/generated/` path. If the requested file exists, it is served directly. If not, it is generated, saved to the path, and served.
+
 ---
 
 ## 4. Translation Format
 
 ### 4.1 Keys
 
-Keys must be declared with hyphens as word separator characters:
-
-```yaml
-login: "Login"
-sign-in: "Sign in"
-```
+Keys must be declared with hyphens as word separator characters (`sign-in`, `login-button`).
+**Duplicate keys are allowed** as long as they reside in *different* sections.
 
 ### 4.2 Placeholders
 
@@ -76,22 +75,17 @@ hello-username: "Hello {name}"
 cart-count: "You have {count} items in your cart."
 ```
 
-### 4.3 Encoding
+### 4.3 Custom Formats via Templates
 
-All files must be UTF-8 encoded (without BOM recommended, with full Unicode support).
-
-### 4.4 Custom Formats via Templates
-
-To support arbitrary application requirements, custom formats can be defined using Handlebars (`.hbs`) templates. The microservice resolves fallbacks, flattens the requested sections, and injects the following JSON data model into the template at request time:
+To support arbitrary application requirements, custom formats can be defined using Handlebars (`.hbs`) templates. The microservice injects the following JSON data model into the template:
 
 ```json
 {
   "library": "users",
   "version": "1.0.0",
   "locale": "en-US",
-  "sections": ["login", "checkout"],
+  "sections": ["login"],
   "translations": [
-    { "key": "login", "value": "Login" },
     { "key": "sign-in", "value": "Sign in" }
   ]
 }
@@ -112,7 +106,7 @@ To support arbitrary application requirements, custom formats can be defined usi
 
 ## 5. Library Configuration (`config.yaml`)
 
-Required at the root of each versioned library. A missing or malformed file causes the version to be rejected at upload time.
+Required at the root of the library version. A missing or malformed file causes the version to be rejected at freeze time.
 
 ```yaml
 base_locale: "en-US" # Primary locale — defines the master key set  
@@ -140,7 +134,7 @@ The base_locale field defines the master key set. Non-primary locales must not c
 
 ## 6. Validation
 
-Runs at **container startup** (for all already-stored library versions) and on each **upload API call** (for the incoming versions only). A failed check logs a CRITICAL error, logs the problem and marks the library version as UNAVAILABLE in memory. **No validation occurs at request time.**
+Validation runs when saving edits via the Dashboard, and critically when **freezing** a version. If a frozen version fails validation, the freeze operation is aborted. **No validation occurs at request time.**
 
 | Check | Always | Only when `on_missing_translation: error` |
 | --- | --- | --- |
@@ -149,7 +143,6 @@ Runs at **container startup** (for all already-stored library versions) and on e
 | No complex ICU logic (plurals, select) in placeholders (only simple variables allowed) | ✓ | |
 | Placeholder consistency across locales | ✓ | |
 | No orphan keys in non-primary locales | ✓ | |
-| No duplicate keys are allowed across different sections within the same library version | ✓ | |
 | Template files referenced in `config.yaml` exist at the library root | ✓ | |
 | Template syntax compilation (valid Handlebars logic) | ✓ | |
 | Custom format names do not collide with native formats (`android`, `ios`, `json`, `gettext`) | ✓ | |
@@ -159,54 +152,50 @@ Runs at **container startup** (for all already-stored library versions) and on e
 
 ## 7. API
 
-### 7.1 Base URL
+### 7.1 Base URL & Authentication
 
-`/api/v1` *(independent from library versions)*
-
----
-
-### 7.2 Upload Library Version
-
-```sh
-POST /api/v1/upload
-Content-Type: multipart/form-data
-```
-
-- Uploads one or more versioned libraries to the service. The request body must include a `file` field containing a `.zip` archive. The zip must mirror the storage structure defined in [Section 2](#2-storage-structure)
-- A zip may contain multiple library versions. All zip contents are validated before being stored. If a single library fails validation, nothing is imported and a `422 UNPROCESSABLE_ENTITY` is returned using the [standard error response](#77-error-responses).
-- Trying to upload a library with a version that already exists will cause an upload failure.
-- If all libraries can be imported, a standard 200 response is given: `{"status": "success", "imported_libraries": ["users/1.0.0"]}`
-- If the request itself is malformed (missing `file` field, invalid zip), a `400 Bad Request` is returned using the [standard error response](#77-error-responses).
-- Upload requests are authenticated with `Authorization: Bearer <STATIC_TOKEN>`
+`/api/v1`
+API write/freeze requests are authenticated with `Authorization: Bearer <STATIC_TOKEN>`.
 
 ---
 
-### 7.3 Retrieve Translations
+### 7.2 Dashboard & Management UI
 
 ```sh
-# Get translations for a specific locale from a single section
-GET /api/v1/lib/{library}/{version}/{format}/{locale}/{section}.{extension}
-
-# Get translations for a specific locale from multiple sections
-GET /api/v1/lib/{library}/{version}/{format}/{locale}/{section1},{section2},...,{sectionN}.{extension}
-
-# Get translations for a specific locale from an entire library version
-GET /api/v1/lib/{library}/{version}/{format}/{locale}.{extension}
+GET /api/v1/dashboard
 ```
 
-Note: Merging sections will generate a single file with all the combined keys from the original sections.
+Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrators to:
 
-**Examples:**
+- Create new libraries.
+- Create and manage sections within libraries.
+- Add, edit, and remove translation locales and keys.
+- Edit `config.yaml` and Handlebars templates.
+- **Publish (freeze)** library versions.
+- Delete existing libraries or sections.
+
+---
+
+### 7.3 Freeze Library Version
 
 ```sh
-# Native Android XML — English translations from the login section of users v1.0.0
-GET /api/v1/lib/users/1.0.0/android/en-US/login.xml
+POST /api/v1/lib/{library}/freeze
+Content-Type: application/json
+```
+**Payload:** `{"version": "1.0.0"}`
+Validates the latest working state. If validation passes, copies the latest state into the `version` directory. Returns `422 UNPROCESSABLE_ENTITY` if validation (`strict_validation` or base constraints) fails.
 
-# Native Android XML — login and checkout sections
-GET /api/v1/lib/users/1.0.0/android/en-US/login,checkout.xml
+---
 
-# Custom 'env' format (defined in config.yaml) — login and checkout sections
-GET /api/v1/lib/users/1.0.0/env/en-US/login,checkout.env
+### 7.4 Retrieve Translations
+
+`{version_or_latest}` can be an explicit frozen version (e.g., `1.0.0`) or the literal string `latest`.
+
+**A) Single Section Request:**
+Returns the natively formatted file for the requested section.
+
+```sh
+GET /api/v1/lib/{library}/{version_or_latest}/{format}/{locale}/{section}.{extension}
 ```
 
 **Supported formats and extensions:**
@@ -219,82 +208,79 @@ GET /api/v1/lib/users/1.0.0/env/en-US/login,checkout.env
 | `gettext` | `.po` | |
 | *(custom)* | *(custom)* | Dynamically resolved from `custom_formats` block in `config.yaml` |
 
----
+*Example:* `GET /api/v1/lib/users/latest/android/en-US/login.xml`
 
-### 7.4 Catalog
-
-Returns a human-readable HTML page listing all stored libraries, their published versions, and for each version: the available sections, supported locales, and supported custom formats. It also gives information about missing keys (regardless of on_missing_translation setting).
-
-```sh
-GET /api/v1/catalog
-```
-
-**Response:** `Content-Type: text/html`, `200 OK`
-
----
-
-### 7.5 Health & Readiness
-
-Used by orchestrators (Kubernetes, ECS, etc.) to determine whether the service is ready to handle traffic. The endpoints become available immediately at container start; their status reflects the current startup validation phase.
+**B) Multi-Section or Full Library Request:**
+When requesting multiple sections OR the entire library, the extension **MUST be `.json`**.
 
 ```sh
-GET /api/v1/health/live # always returns 200 immediately
-GET /api/v1/health/ready # returns 503 until startup validation is done. Then returns 200 OK, even if some libraries failed validation and were marked UNAVAILABLE.
+GET /api/v1/lib/{library}/{version_or_latest}/{format}/{locale}/{section1},{section2}.json
+GET /api/v1/lib/{library}/{version_or_latest}/{format}/{locale}.json
+```
+
+Requesting any other extension (e.g., `.xml`, `.strings`) for multiple sections will return a `400 BAD_REQUEST`.
+
+**JSON Response Structure:**
+The response encapsulates each requested section, mapping the section name to its rendered string in the requested `{format}`.
+
+```json
+{
+  "login": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n<string name=\"sign-in\">Sign in</string>\n</resources>",
+  "checkout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n<string name=\"pay\">Pay</string>\n</resources>"
+}
 ```
 
 ---
 
-### 7.6 Caching & Response
+### 7.5 File Generation & Storage
 
-Responses are **lazily cached in-memory** within the container. On first request:
+To guarantee efficiency and predictability, the service relies on disk-based file storage rather than in-memory caching. More efficient caching mechanisms like a CDN can be used to further improve performance:
 
-1. If multiple sections are requested at once, sort them alphabetically to prevent redundant cache values
-2. Load YAML sources for the requested library/version/section
-3. Apply fallback strategy if needed
-4. Compile native output OR process custom Handlebars template
-5. Cache the transformed result and return
-
-- Source data is immutable, cached entries never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
+- **For Frozen Versions (`1.0.0`, etc.):**
+   Upon receiving a request, the service checks the internal docker volume `.generated/` path. If the requested compiled artifact exists, it is streamed directly. If missing, the service generates the artifact, saves it to the path, and streams it. Since frozen versions are immutable, these generated files never expire. HTTP responses include aggressive headers to leverage browser and CDN caching:
 
 ```text
 Cache-Control: public, max-age=31536000, immutable
 ```
 
+- **For Active Work (`latest`):**
+   Files requested for the `latest` version bypass the generation storage. They are computed dynamically on the fly on every request, ensuring developers always see the absolute latest edits made in the Dashboard.
+
 ---
 
-### 7.7 Error Responses
+### 7.6 Error Responses
 
-All error responses use a consistent JSON body:
+Standard JSON error bodies:
 
 ```json
 {
   "error": "ERROR_CODE",
-  "message": "A human-readable description of the error."
+  "message": "Human-readable description."
 }
 ```
 
 | HTTP Code | `error` value | Meaning |
 | --- | --- | --- |
-| `400` | `BAD_REQUEST` | Malformed request (e.g. missing file field, invalid zip) |
-| `400` | `UNSUPPORTED_FORMAT` | Unsupported format/extension combination (not a native format, and not defined in `config.yaml`) |
-| `401` | `UNAUTHORIZED` | Missing or invalid Bearer token on upload request |
-| `404` | `NOT_FOUND` | Library, version, section, or locale not found |
-| `409` | `CONFLICT` | Uploaded a library version that already existed |
-| `422` | `UNPROCESSABLE_ENTITY` | Translation or template validation failures |
-| `500` | `INTERNAL_ERROR` | Internal transformation failure (e.g. Handlebars rendering error) |
-| `503` | `SERVICE_UNAVAILABLE` | Library exists but is marked UNAVAILABLE due to corruption/validation failure |
+| `400` | `BAD_REQUEST` | Malformed request |
+| `400` | `UNSUPPORTED_FORMAT` | Unsupported format/extension combination. |
+| `401` | `UNAUTHORIZED` | Missing or invalid Bearer token. |
+| `404` | `NOT_FOUND` | Library, version, section, or locale not found. |
+| `409` | `CONFLICT` | Attempted to freeze to a version string that already exists. |
+| `422` | `UNPROCESSABLE_ENTITY` | Validation failures during a freeze operation. |
+| `500` | `INTERNAL_ERROR` | Internal transformation failure (e.g., I/O write error, Handlebars error). |
 
 ---
 
 ## 8. Observability
 
-The service emits logs to stdout and stderr:
+**Logging:**
 
-- Validation failures (ingestion)
-- Missing translation warnings (when any fallback mode is active)
-- Errors
+- Standard output logs via Spring Boot's SLF4J/Logback integration.
+- Warns on missing translation fallbacks; errors on I/O generation failures.
 
-The service emits Prometheus metrics at the /metrics endpoint:
+**Metrics & Health:**
 
-- Cache hit/miss ratio
-- Request latency metrics
+Exposed via Spring Boot Actuator (/actuator):
+
+- `/actuator/prometheus`: Disk-based generation metrics, request latency, JVM memory, and garbage collection metrics.
+- `/actuator/health/liveness` & `/actuator/health/readiness`: Standard health probes for orchestrators (Kubernetes, ECS).
