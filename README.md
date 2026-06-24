@@ -84,7 +84,7 @@ To support arbitrary application requirements, custom formats can be defined usi
   "library": "users",
   "version": "1.0.0",
   "locale": "en-US",
-  "sections": ["login"],
+  "section": "login",
   "translations": [
     { "key": "sign-in", "value": "Sign in" }
   ]
@@ -142,11 +142,11 @@ Validation runs when saving edits via the Dashboard, and critically when **freez
 | hyphens and alphanumeric lowercase key format | ✓ | |
 | No complex ICU logic (plurals, select) in placeholders (only simple variables allowed) | ✓ | |
 | Placeholder consistency across locales | ✓ | |
-| No orphan keys in non-primary locales | ✓ | |
+| No orphan keys in non-primary locales (only applied when freezing) | ✓ | |
 | Template files referenced in `config.yaml` exist at the library root | ✓ | |
 | Template syntax compilation (valid Handlebars logic) | ✓ | |
 | Custom format names do not collide with native formats (`android`, `ios`, `json`, `gettext`) | ✓ | |
-| 100% key completeness across all locales and sections | | ✓ |
+| 100% key completeness across all locales and sections (only applied when freezing) | | ✓ |
 
 ---
 
