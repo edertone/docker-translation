@@ -4,12 +4,12 @@
 
 A containerized microservice providing a centralized translation source of truth. Distributed as a standalone Docker container, it is ready to be deployed via Docker Compose or orchestrated environments (Kubernetes, ECS).
 
-The service provides "working drafts" for active translation editing through a built-in UI, and allows freezing deterministic, immutable published releases for production runtime. It exposes an API that retrieves localized text in multiple native formats (Android, iOS, Web, backend) and user-defined custom templates.
+The service provides "working drafts" for active translation editing through a built-in UI, and allows freezing deterministic, immutable published releases for production runtime. It exposes an API that retrieves localized text in multiple native formats (Android, iOS, Web, backend) and user made formats defined via custom templates.
 
 **Core principles:**
 
 - **Technology Stack:** Java 21, Spring Boot 3.2+, fully containerized.
-- **Canonical YAML storage:** Single source of truth backed by a distributed file system or object store.
+- **Canonical YAML storage:** Single source of truth saved into the container file system.
 - **Draft & Release states:** Actively edit draft branches (e.g., `main`); freeze deterministic releases (e.g., `1.0.0`) for production.
 - **Platform-agnostic output:** Native formats (including plurals mapping) plus custom Handlebars templates.
 - **File-based Generation:** Artifacts are generated on demand, cached safely using atomic operations, and served rapidly.
@@ -101,11 +101,19 @@ To support arbitrary application requirements, custom formats can be defined usi
 
 ## 5. Library Configuration (`config.yaml`)
 
-Required at the root of every library branch/release. A missing or malformed file causes the draft to be rejected at freeze time.
+Required at the root of every library branch/release (a missing or malformed file causes the draft to be rejected at freeze time).
 
 ```yaml
 base_locale: "en-US" # Primary locale — defines the master key set  
 on_missing_translation: "fallback"
+
+# Optional hierarchical fallback chains. 
+# Used when on_missing_translation is set to "fallback"
+fallback_chains:
+  "es-AR": "es-ES"   # If a key is missing in es-AR, look in es-ES
+  "es-MX": "es-ES"   
+  "fr-CA": "fr-FR"
+  "en-GB": "en-US"
 
 # Optional custom formats bindings
 custom_formats:
@@ -119,7 +127,7 @@ custom_formats:
 | Mode | Behavior |
 | --- | --- |
 | `error` | Reject the library at freeze time if any locale in any section is missing keys defined by the primary locale |
-| `fallback` | Replace missing value with the key match from base_locale |
+| `fallback` | 1. Traverse fallback_chains if mapped. 2. If unmapped or chain is exhausted, perform implicit fallback by dropping the BCP-47 region code (e.g., es-AR ➔ es). 3. If still missing, use the value from base_locale |
 | `return_key` | Replace missing value with the raw key name (e.g. `"login"`) |
 | `return_empty` | Replace missing value with `""` |
 
@@ -134,11 +142,13 @@ To prevent workflow gridlock while ensuring production stability, validation rul
 - YAML 1.2 strict syntax (prevents boolean casting of `no`, `true`).
 - Hyphenated, alphanumeric lowercase key format.
 - Valid ICU MessageFormat syntax (plurals/variables).
+- `config.yaml` structural validation (e.g., ensuring `fallback_chains` contains no circular references, such as `es-ES` -> `es-AR` -> `es-ES`).
 
 **Phase 2:** Cross-File / Integrity (Runs strictly on Freeze/Publish)
 
 - Placeholder consistency across locales (e.g., `es-ES` must contain the same variables as `en-US`).
 - No orphan keys in non-primary locales (keys not present in `base_locale`).
+- Locales referenced in `fallback_chains` must exist within the library.
 - Template files referenced in `config.yaml` exist and compile successfully.
 - If `on_missing_translation: error` is set, verifies 100% key completeness across all locales.
 
@@ -164,7 +174,7 @@ Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrato
 - Create new libraries.
 - Create and manage sections within libraries.
 - Add, edit, and remove translation locales and keys.
-- Edit `config.yaml` and Handlebars templates.
+- Edit `config.yaml` (including mapping `fallback_chains`) and Handlebars templates.
 - **Publish (freeze)** library versions.
 - Delete existing draft libraries or sections.
 
@@ -280,7 +290,7 @@ Standard JSON error bodies:
 | `401` | `UNAUTHORIZED` | Missing or invalid authentication. |
 | `404` | `NOT_FOUND` | Library, ref, section, or locale not found. |
 | `409` | `CONFLICT` | Attempted to freeze to a version string that already exists. |
-| `422` | `UNPROCESSABLE_ENTITY` | Integrity validation failures during a freeze operation. |
+| `422` | `UNPROCESSABLE_ENTITY` | Integrity validation failures during a freeze operation (e.g., broken fallback chain). |
 | `500` | `INTERNAL_ERROR` | Internal transformation failure (e.g., I/O write error, Handlebars error). |
 
 ---
@@ -290,7 +300,7 @@ Standard JSON error bodies:
 **Logging & Auditing:**
 
 - Application logs via SLF4J/Logback.
-- **Audit Logs:** All modifications (Keys, Locales, Freeze operations) are logged with the authenticated User's Identity (extracted from JWT) and a timestamp (e.g., `User auth0|123 modified 'login-btn' in drafts/main at 2024-05-10T14:30:00Z`).
+- **Audit Logs:** All modifications (Keys, Locales, Config edits, Freeze operations) are logged with the authenticated User's Identity (extracted from JWT) and a timestamp (e.g., `User auth0|123 modified 'login-btn' in drafts/main at 2024-05-10T14:30:00Z`).
 
 **Metrics & Health:**
 Exposed via Spring Boot Actuator (`/actuator`):
