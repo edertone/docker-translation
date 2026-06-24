@@ -18,7 +18,7 @@ The service provides "working drafts" for active translation editing through a b
 
 ## 2. Storage Structure
 
-Translations, templates, and internally generated files are stored in a centralized storage volume (e.g., AWS EFS, Kubernetes `ReadWriteMany` PV, or S3-compatible backend) to prevent split-brain issues across multiple container replicas.
+Translations, templates, and internally generated files are stored in a centralized storage root that can be mounted into a docker volume or AWS EFS, Kubernetes `ReadWriteMany` PV to prevent split-brain issues across multiple container replicas.
 
 The structure isolates `drafts` (working states) from `releases` (frozen versions), and maintains a `.generated` directory for compiled artifacts.
 
@@ -118,12 +118,10 @@ custom_formats:
 
 | Mode | Behavior |
 | --- | --- |
-| `error` | Reject the entire library at upload time if any locale in any section is missing keys defined by the primary locale |
+| `error` | Reject the library at freeze time if any locale in any section is missing keys defined by the primary locale |
 | `fallback` | Replace missing value with the key match from base_locale |
 | `return_key` | Replace missing value with the raw key name (e.g. `"login"`) |
 | `return_empty` | Replace missing value with `""` |
-
-The base_locale field defines the master key set. Non-primary locales must not contain keys absent from it — orphan keys will cause the version to be rejected at freeze time.
 
 ---
 
@@ -158,7 +156,7 @@ The API requires standard OIDC / JWT `Authorization: Bearer <TOKEN>` to track us
 ### 7.2 Dashboard UI & CRUD API
 
 ```sh
-GET /api/v1/dashboard
+GET /dashboard
 ```
 
 Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrators to:
@@ -168,14 +166,31 @@ Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrato
 - Add, edit, and remove translation locales and keys.
 - Edit `config.yaml` and Handlebars templates.
 - **Publish (freeze)** library versions.
-- Delete existing libraries or sections.
+- Delete existing draft libraries or sections.
 
 **Management APIs:**
-The UI interacts with the following backend APIs to modify working drafts. Requests utilize `ETag` headers to implement optimistic locking, preventing concurrent edit overwrites (`412 Precondition Failed`).
+The UI interacts with the following backend APIs to modify working drafts.
 
 - `POST /api/v1/lib/{library}/branches/{branch}` (Create new branch from release or main)
-- `PUT /api/v1/lib/{library}/drafts/{branch}/{section}/{locale}` (Update translations, requires `If-Match: "etag-hash"`)
+- `PUT /api/v1/lib/{library}/drafts/{branch}/{section}/{locale}` (Update translations)
 - `PUT /api/v1/lib/{library}/drafts/{branch}/config` (Update config/templates)
+- `POST /api/v1/lib/{library}/drafts/{branch}/{section}` (Create a new section)
+- `POST /api/v1/lib/{library}/drafts/{branch}/{section}/{locale}` (Add a new locale to an existing section. Must be valid IETF BCP 47 language tags (e.g., en-US))
+- `DELETE /api/v1/lib/{library}` (Deletes a library. Frozen data is retained and remains accessible via API)
+- `DELETE /api/v1/lib/{library}/drafts/{branch}/{section}` (Deletes a section. Frozen data is retained and remains accessible via API)
+
+To handle concurrent edits from multiple UI instances, the service uses a "Last-Write-Wins" model paired with Real-time Notifications. The backend does not block concurrent saves, but instead notifies active users when underlying files change, shifting merge/conflict resolution to the user. Upon loading, the Dashboard UI must establish a Server-Sent Events (SSE) connection to GET /api/v1/stream. When any draft file is successfully saved, the server broadcasts an event to all connected clients and a UI warning will appear:
+
+```json
+{
+  "library": "my-app",
+  "branch": "main",
+  "section": "login",
+  "locale": "es-ES",
+  "updatedBy": "admin@example.com",
+  "timestamp": "2024-05-10T14:30:00Z"
+}
+```
 
 ---
 
@@ -188,9 +203,9 @@ Content-Type: application/json
 
 **Payload:** `{"source_branch": "main", "version": "1.0.0"}`
 
-Validates the draft state (Phase 2 Validation). If successful, clones the draft into the immutable `version` release. Returns `422 UNPROCESSABLE_ENTITY` with a validation report if it fails.
-
-*(Optional: `DELETE /api/v1/lib/{library}/releases/{version}` soft-deletes/deprecates a broken release.)*
+Validates the draft state (Phase 2 Validation). If successful, clones the draft into the immutable `version` release.
+Returns `201 CREATED` with the new version string on success.
+Returns `422 UNPROCESSABLE_ENTITY` with a validation report if it fails.
 
 ---
 
@@ -244,7 +259,7 @@ The response encapsulates each requested section, mapping the section name to it
    Responses include aggressive caching: `Cache-Control: public, max-age=31536000, immutable`.
 
 - **For Active Drafts (`drafts/main`):**
-   Dynamically computed to ensure the absolute latest edits are served. To prevent CPU exhaustion (DDoS) from heavy requests, the service returns `ETag` headers based on the draft's current commit/hash state, allowing clients to receive `304 Not Modified` without triggering Handlebars compilation.
+   Dynamically computed to ensure the absolute latest edits are served.
 
 ---
 
@@ -265,7 +280,6 @@ Standard JSON error bodies:
 | `401` | `UNAUTHORIZED` | Missing or invalid authentication. |
 | `404` | `NOT_FOUND` | Library, ref, section, or locale not found. |
 | `409` | `CONFLICT` | Attempted to freeze to a version string that already exists. |
-| `412` | `PRECONDITION_FAILED` | ETag mismatch during a PUT request (concurrent edit blocked). |
 | `422` | `UNPROCESSABLE_ENTITY` | Integrity validation failures during a freeze operation. |
 | `500` | `INTERNAL_ERROR` | Internal transformation failure (e.g., I/O write error, Handlebars error). |
 
@@ -281,5 +295,5 @@ Standard JSON error bodies:
 **Metrics & Health:**
 Exposed via Spring Boot Actuator (`/actuator`):
 
-- `/actuator/prometheus`: Disk-based generation metrics, request latency, concurrent edit conflicts (`412`s), JVM memory.
+- `/actuator/prometheus`: Disk-based generation metrics, request latency, JVM memory.
 - `/actuator/health/liveness` & `readiness`: Standard health probes for Kubernetes/ECS integration.
