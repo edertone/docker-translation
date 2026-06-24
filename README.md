@@ -181,15 +181,15 @@ Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrato
 **Management APIs:**
 The UI interacts with the following backend APIs to modify working drafts.
 
-- `POST /api/v1/lib/{library}/branches/{branch}` (Create new branch from release or main)
-- `PUT /api/v1/lib/{library}/drafts/{branch}/{section}/{locale}` (Update translations)
-- `PUT /api/v1/lib/{library}/drafts/{branch}/config` (Update config/templates)
-- `POST /api/v1/lib/{library}/drafts/{branch}/{section}` (Create a new section)
-- `POST /api/v1/lib/{library}/drafts/{branch}/{section}/{locale}` (Add a new locale to an existing section. Must be valid IETF BCP 47 language tags (e.g., en-US))
-- `DELETE /api/v1/lib/{library}` (Deletes a library. Frozen data is retained and remains accessible via API)
-- `DELETE /api/v1/lib/{library}/drafts/{branch}/{section}` (Deletes a section. Frozen data is retained and remains accessible via API)
+- `POST /api/v1/manage/{library}/branches/{branch}` (Create new branch from release or main)
+- `PUT /api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` (Update translations)
+- `PUT /api/v1/manage/{library}/drafts/{branch}/config` (Update config/templates)
+- `POST /api/v1/manage/{library}/drafts/{branch}/{section}` (Create a new section)
+- `POST /api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` (Add a new locale to an existing section. Must be valid IETF BCP 47 language tags (e.g., en-US))
+- `DELETE /api/v1/manage/{library}` (Deletes a library. Frozen data is retained and remains accessible via API)
+- `DELETE /api/v1/manage/{library}/drafts/{branch}/{section}` (Deletes a section. Frozen data is retained and remains accessible via API)
 
-To handle concurrent edits from multiple UI instances, the service uses a "Last-Write-Wins" model paired with Real-time Notifications. The backend does not block concurrent saves, but instead notifies active users when underlying files change, shifting merge/conflict resolution to the user. Upon loading, the Dashboard UI must establish a Server-Sent Events (SSE) connection to GET /api/v1/stream. When any draft file is successfully saved, the server broadcasts an event to all connected clients and a UI warning will appear:
+To handle concurrent edits from multiple UI instances, the service uses a "Last-Write-Wins" model paired with Real-time Notifications. The backend does not block concurrent saves, but instead notifies active users when underlying files change, shifting merge/conflict resolution to the user. Upon loading, the Dashboard UI must establish a Server-Sent Events (SSE) connection to GET /api/v1/manage/stream. When any draft file is successfully saved, the server broadcasts an event to all connected clients and a UI warning will appear:
 
 ```json
 {
@@ -207,7 +207,7 @@ To handle concurrent edits from multiple UI instances, the service uses a "Last-
 ### 7.3 Freeze Library Version (Publish)
 
 ```sh
-POST /api/v1/lib/{library}/freeze
+POST /api/v1/manage/{library}/freeze
 Content-Type: application/json
 ```
 
@@ -227,7 +227,7 @@ Returns `422 UNPROCESSABLE_ENTITY` with a validation report if it fails.
 Returns the natively formatted file for the requested section.
 
 ```sh
-GET /api/v1/lib/{library}/{ref}/{format}/{locale}/{section}.{extension}
+GET /api/v1/translations/{library}/{ref}/{format}/{locale}/{section}.{extension}
 ```
 
 **Supported formats and extensions:**
@@ -244,8 +244,8 @@ GET /api/v1/lib/{library}/{ref}/{format}/{locale}/{section}.{extension}
 When requesting multiple sections OR the entire library, the extension **MUST be `.json`**.
 
 ```sh
-GET /api/v1/lib/{library}/{ref}/{format}/{locale}/{section1},{section2}.json
-GET /api/v1/lib/{library}/{ref}/{format}/{locale}.json
+GET /api/v1/translations/{library}/{ref}/{format}/{locale}/{section1},{section2}.json
+GET /api/v1/translations/{library}/{ref}/{format}/{locale}.json
 ```
 
 Requesting any other extension (e.g., `.xml`, `.strings`) for multiple sections will return a `400 BAD_REQUEST`.
