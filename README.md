@@ -209,7 +209,7 @@ Serves the admin web UI (HTML/JS/CSS). Supports: creating and deleting libraries
 All endpoints in this section require authentication. Concurrent edits use **Last-Write-Wins**; active sessions are notified of file changes in real time via SSE (`GET /api/v1/manage/stream`).
 
 | Method | Path | Request body | Success | Notes |
-|--------|------|-------------|---------|-------|
+| -------- | ------ | ------------- | --------- | ------- |
 | `GET` | `/manage` | — | `200` `["users","products"]` | List libraries |
 | `POST` | `/manage/{library}` | `{"base_locale","on_missing_translation"}` | `201` `{"library","branch"}` | Creates library + `drafts/main/config.yaml` |
 | `GET` | `/manage/{library}` | — | `200` `{"library","drafts":[],"releases":[]}` | Library overview |
@@ -232,6 +232,7 @@ All endpoints in this section require authentication. Concurrent edits use **Las
 | `GET` | `/manage/stream` | — | SSE | Broadcasts save events to all authenticated clients |
 
 **Locale warning response body** (`200 OK`):
+
 ```json
 {
   "warnings": [{
@@ -245,6 +246,7 @@ All endpoints in this section require authentication. Concurrent edits use **Las
 ```
 
 **SSE event shape:**
+
 ```json
 { "library": "my-app", "branch": "main", "section": "login", "locale": "es-ES", "updatedBy": "admin@example.com", "timestamp": "2024-05-10T14:30:00Z" }
 ```
@@ -261,7 +263,7 @@ POST /api/v1/manage/{library}/freeze
 Runs Phase 2 validation then clones the draft into an immutable release.
 
 | Outcome | Status | Body |
-|---------|--------|------|
+| --------- | -------- | ------ |
 | Success | `201` | `{"library","version"}` |
 | Version already exists | `409` | Standard error |
 | Validation failure | `422` | `{"error","message","validation_errors":[...]}` |
@@ -269,7 +271,7 @@ Runs Phase 2 validation then clones the draft into an immutable release.
 **Validation error codes:**
 
 | Code | Description |
-|------|-------------|
+| ------ | ------------- |
 | `MISSING_CONFIG` | `config.yaml` absent from source branch |
 | `MISSING_KEY` | Key from `base_locale` absent in another locale (`on_missing_translation: error` only) |
 | `ORPHAN_KEY` | Key in non-primary locale has no counterpart in `base_locale` |
@@ -285,6 +287,7 @@ Runs Phase 2 validation then clones the draft into an immutable release.
 Draft endpoints require authentication; release endpoints are unauthenticated.
 
 **A) Single Section Request:**
+
 ```sh
 GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{section}.{ext}
 GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{section}.{ext}
@@ -304,7 +307,7 @@ Using any extension other than `.zip` for a multi-section request returns `400 B
 **Supported formats:**
 
 | `format` | `extension` | Notes |
-|----------|-------------|-------|
+| ---------- | ------------- | ------- |
 | `android` | `.xml` | ICU plurals → `<plurals>` |
 | `ios` | `.strings`, `.xcstrings` | `.stringsdict` generated for plurals |
 | `json` | `.json` | Raw ICU strings |
