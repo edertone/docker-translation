@@ -187,328 +187,66 @@ To prevent workflow gridlock while ensuring production stability, validation rul
 
 ### 7.2 Authentication
 
-All management and draft-read endpoints require:
+All management and draft-read endpoints require `Authorization: Bearer <TOKEN>`.
 
-```text
-Authorization: Bearer <TOKEN>
-```
-
-**Translation retrieval authentication:**
-
-- **Frozen release endpoints** (`/api/v1/translations/{library}/releases/...`) are **unauthenticated by default**, enabling direct CDN integration and zero-credential access for production clients.
-- **Draft branch endpoints** (`/api/v1/translations/{library}/drafts/...`) require a valid `Authorization: Bearer` token to prevent accidental exposure of unreleased content.
+- **Release endpoints** (`/api/v1/translations/{library}/releases/...`) — unauthenticated; CDN-friendly.
+- **Draft endpoints** (`/api/v1/translations/{library}/drafts/...`) — token required.
 
 ---
 
-### 7.3 Dashboard UI
+### 7.3 Dashboard
 
 ```sh
 GET /dashboard
 ```
 
-Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrators to:
-
-- Create new libraries.
-- Create and manage sections within libraries.
-- Add, edit, and remove translation locales and keys.
-- Edit `config.yaml` (including mapping `fallback_chains`) and Handlebars templates.
-- **Publish (freeze)** library versions.
-- Delete existing draft libraries, branches, or sections.
+Serves the admin web UI (HTML/JS/CSS). Supports: creating and deleting libraries, branches, sections, and locales; editing translations, `config.yaml`, and Handlebars templates; publishing (freezing) releases.
 
 ---
 
 ### 7.4 Management API
 
-All endpoints in this section require authentication [see 7.2](#72-authentication).
+All endpoints in this section require authentication. Concurrent edits use **Last-Write-Wins**; active sessions are notified of file changes in real time via SSE (`GET /api/v1/manage/stream`).
 
-To handle concurrent edits from multiple UI instances, the service uses a **Last-Write-Wins** model paired with Real-time Notifications. The backend does not block concurrent saves, but instead notifies active users when underlying files change via SSE, shifting merge/conflict resolution to the user. Upon loading, the Dashboard UI establishes an SSE connection to `GET /api/v1/manage/stream` [see Live Change Stream](#live-change-stream).
+| Method | Path | Request body | Success | Notes |
+|--------|------|-------------|---------|-------|
+| `GET` | `/manage` | — | `200` `["users","products"]` | List libraries |
+| `POST` | `/manage/{library}` | `{"base_locale","on_missing_translation"}` | `201` `{"library","branch"}` | Creates library + `drafts/main/config.yaml` |
+| `GET` | `/manage/{library}` | — | `200` `{"library","drafts":[],"releases":[]}` | Library overview |
+| `GET` | `/manage/{library}/releases` | — | `200` `["1.0.0","1.1.0"]` | List frozen releases |
+| `DELETE` | `/manage/{library}` | — | `204` | Deletes all drafts; releases retained |
+| `POST` | `/manage/{library}/branches/{branch}` | `{"source"}` | `201` `{"library","branch","source"}` | `source` may be a draft name or release version; clones all files |
+| `GET` | `/manage/{library}/drafts/{branch}` | — | `200` `{"sections":{},"templates":[],"has_config":true}` | Branch overview |
+| `DELETE` | `/manage/{library}/drafts/{branch}` | — | `204` | — |
+| `GET` | `/manage/{library}/drafts/{branch}/config` | — | `200` YAML | Raw `config.yaml` |
+| `PUT` | `/manage/{library}/drafts/{branch}/config` | YAML body | `204` | Phase 1 validation before save |
+| `GET` | `/manage/{library}/drafts/{branch}/templates/{template}` | — | `200` text | Raw `.hbs` content |
+| `PUT` | `/manage/{library}/drafts/{branch}/templates/{template}` | text body | `204` | Phase 1 compile check before save |
+| `DELETE` | `/manage/{library}/drafts/{branch}/templates/{template}` | — | `204` | `config.yaml` refs → Phase 2 failure at freeze |
+| `POST` | `/manage/{library}/drafts/{branch}/{section}` | — | `201` `{"section","branch"}` | Create section |
+| `DELETE` | `/manage/{library}/drafts/{branch}/{section}` | — | `204` | Frozen data retained |
+| `POST` | `/manage/{library}/drafts/{branch}/{section}/{locale}` | optional YAML | `201` | `{locale}` must be a valid BCP 47 tag; Phase 1 runs if body provided |
+| `GET` | `/manage/{library}/drafts/{branch}/{section}/{locale}` | — | `200` YAML | Raw translation file |
+| `PUT` | `/manage/{library}/drafts/{branch}/{section}/{locale}` | YAML body | `204` / `200+warnings` | Phase 1; returns `200` with `warnings` body if `on_missing_translation: error` and keys are missing |
+| `DELETE` | `/manage/{library}/drafts/{branch}/{section}/{locale}` | — | `204` | Frozen data retained |
+| `GET` | `/manage/stream` | — | SSE | Broadcasts save events to all authenticated clients |
 
----
-
-#### List all libraries
-
-```sh
-GET /api/v1/manage
-```
-
-Response `200 OK`:
-
-```json
-["users", "products", "checkout"]
-```
-
----
-
-#### Create a library
-
-```sh
-POST /api/v1/manage/{library}
-Content-Type: application/json
-```
-
-Body:
-
+**Locale warning response body** (`200 OK`):
 ```json
 {
-  "base_locale": "en-US",
-  "on_missing_translation": "fallback"
+  "warnings": [{
+    "code": "INCOMPLETE_LOCALE",
+    "locale": "es-ES",
+    "section": "login",
+    "missing_keys": ["sign-out", "forgot-password"],
+    "message": "2 key(s) present in base locale 'en-US' are missing. Freeze will fail until resolved."
+  }]
 }
 ```
 
-Creates the library and initializes `drafts/main/config.yaml` with the provided values. Returns `201 Created`:
-
+**SSE event shape:**
 ```json
-{ "library": "users", "branch": "main" }
-```
-
----
-
-#### Get library overview
-
-```sh
-GET /api/v1/manage/{library}
-```
-
-Response `200 OK`:
-
-```json
-{
-  "library": "users",
-  "drafts": ["main", "1.0.x"],
-  "releases": ["1.0.0", "1.1.0"]
-}
-```
-
----
-
-#### List frozen releases
-
-```sh
-GET /api/v1/manage/{library}/releases
-```
-
-Response `200 OK`:
-
-```json
-["1.0.0", "1.1.0", "2.0.0"]
-```
-
----
-
-#### Delete a library
-
-```sh
-DELETE /api/v1/manage/{library}
-```
-
-Deletes all draft branches for the library. Frozen releases are **retained** and remain accessible via the translation retrieval API. Returns `204 No Content`.
-
----
-
-#### Create a branch
-
-```sh
-POST /api/v1/manage/{library}/branches/{branch}
-Content-Type: application/json
-```
-
-Body:
-
-```json
-{ "source": "main" }
-```
-
-`source` may be a draft branch name (e.g., `"main"`) or a frozen release version string (e.g., `"1.0.0"`). All files from the source are cloned into the new branch. Returns `201 Created`:
-
-```json
-{ "library": "users", "branch": "1.0.x", "source": "1.0.0" }
-```
-
----
-
-#### Inspect a draft branch
-
-```sh
-GET /api/v1/manage/{library}/drafts/{branch}
-```
-
-Response `200 OK`:
-
-```json
-{
-  "sections": {
-    "login": ["en-US", "es-ES", "fr-FR"],
-    "profile": ["en-US", "es-ES"]
-  },
-  "templates": ["env-format.hbs"],
-  "has_config": true
-}
-```
-
----
-
-#### Delete a draft branch
-
-```sh
-DELETE /api/v1/manage/{library}/drafts/{branch}
-```
-
-Permanently removes the branch and all its contents. Returns `204 No Content`.
-
----
-
-#### Read config
-
-```sh
-GET /api/v1/manage/{library}/drafts/{branch}/config
-```
-
-Returns `200 OK` with `Content-Type: application/yaml` and the raw `config.yaml` content.
-
----
-
-#### Update config
-
-```sh
-PUT /api/v1/manage/{library}/drafts/{branch}/config
-Content-Type: application/yaml
-```
-
-Body: complete replacement `config.yaml` content. Phase 1 structural validation runs before saving. Returns `204 No Content`.
-
----
-
-#### Read a template
-
-```sh
-GET /api/v1/manage/{library}/drafts/{branch}/templates/{template}
-```
-
-Returns `200 OK` with `Content-Type: text/plain` and the raw `.hbs` content.
-
----
-
-#### Create or update a template
-
-```sh
-PUT /api/v1/manage/{library}/drafts/{branch}/templates/{template}
-Content-Type: text/plain
-```
-
-Body: Handlebars template content. Phase 1 compile check runs before saving. Returns `204 No Content`.
-
----
-
-#### Delete a template
-
-```sh
-DELETE /api/v1/manage/{library}/drafts/{branch}/templates/{template}
-```
-
-Returns `204 No Content`. If `config.yaml` references the deleted template, Phase 2 validation will fail at freeze time.
-
----
-
-#### Create a section
-
-```sh
-POST /api/v1/manage/{library}/drafts/{branch}/{section}
-```
-
-No body required. Returns `201 Created`:
-
-```json
-{ "section": "checkout", "branch": "main" }
-```
-
----
-
-#### Delete a section
-
-```sh
-DELETE /api/v1/manage/{library}/drafts/{branch}/{section}
-```
-
-Deletes the section from the draft. Frozen data is retained and remains accessible. Returns `204 No Content`.
-
----
-
-#### Add a locale to a section
-
-```sh
-POST /api/v1/manage/{library}/drafts/{branch}/{section}/{locale}
-Content-Type: application/yaml
-```
-
-`{locale}` must be a valid IETF BCP 47 language tag (e.g., `en-US`, `fr-FR`). The body is optional: if provided, it is treated as the initial YAML translation content and Phase 1 validation runs before saving. Returns `201 Created`.
-
----
-
-#### Read translations for a locale
-
-```sh
-GET /api/v1/manage/{library}/drafts/{branch}/{section}/{locale}
-```
-
-Returns `200 OK` with `Content-Type: application/yaml` and the raw YAML translation file content.
-
----
-
-#### Update translations for a locale
-
-```sh
-PUT /api/v1/manage/{library}/drafts/{branch}/{section}/{locale}
-Content-Type: application/yaml
-```
-
-Body: complete replacement YAML content for the locale file. Phase 1 validation runs before saving.
-
-When `on_missing_translation: error` is configured, the response includes a non-blocking `warnings` array if keys are missing relative to `base_locale`. Returns `204 No Content` when no warnings apply, or `200 OK` with the warnings body:
-
-```json
-{
-  "warnings": [
-    {
-      "code": "INCOMPLETE_LOCALE",
-      "locale": "es-ES",
-      "section": "login",
-      "missing_keys": ["sign-out", "forgot-password"],
-      "message": "2 key(s) present in base locale 'en-US' are missing. Freeze will fail until resolved."
-    }
-  ]
-}
-```
-
----
-
-#### Remove a locale from a section
-
-```sh
-DELETE /api/v1/manage/{library}/drafts/{branch}/{section}/{locale}
-```
-
-Returns `204 No Content`. Frozen data is retained and remains accessible.
-
----
-
-#### Live Change Stream
-
-```sh
-GET /api/v1/manage/stream
-Authorization: Bearer <TOKEN>
-```
-
-Establishes a persistent SSE connection. Broadcasts an event to all connected authenticated clients whenever any draft file is successfully saved:
-
-```json
-{
-  "library": "my-app",
-  "branch": "main",
-  "section": "login",
-  "locale": "es-ES",
-  "updatedBy": "admin@example.com",
-  "timestamp": "2024-05-10T14:30:00Z"
-}
+{ "library": "my-app", "branch": "main", "section": "login", "locale": "es-ES", "updatedBy": "admin@example.com", "timestamp": "2024-05-10T14:30:00Z" }
 ```
 
 ---
@@ -517,96 +255,61 @@ Establishes a persistent SSE connection. Broadcasts an event to all connected au
 
 ```sh
 POST /api/v1/manage/{library}/freeze
-Content-Type: application/json
+{"source_branch": "main", "version": "1.0.0"}
 ```
 
-**Payload:** `{ "source_branch": "main", "version": "1.0.0" }`
+Runs Phase 2 validation then clones the draft into an immutable release.
 
-Attempting to freeze to an already-existing version returns `409 CONFLICT`. Runs Phase 2 Validation against the source branch. On success, clones the draft into the immutable release. Returns `201 Created`:
-
-```json
-{ "library": "users", "version": "1.0.0" }
-```
-
-On validation failure, returns `422 UNPROCESSABLE_ENTITY` with a structured report:
-
-```json
-{
-  "error": "UNPROCESSABLE_ENTITY",
-  "message": "Freeze validation failed with 2 error(s).",
-  "validation_errors": [
-    {
-      "code": "MISSING_KEY",
-      "section": "login",
-      "locale": "es-ES",
-      "key": "sign-in",
-      "message": "Key 'sign-in' defined in base locale 'en-US' is missing in 'es-ES'."
-    },
-    {
-      "code": "BROKEN_FALLBACK_CHAIN",
-      "locale": "es-AR",
-      "message": "Fallback chain target 'es-MX' does not exist in any section of the library."
-    }
-  ]
-}
-```
+| Outcome | Status | Body |
+|---------|--------|------|
+| Success | `201` | `{"library","version"}` |
+| Version already exists | `409` | Standard error |
+| Validation failure | `422` | `{"error","message","validation_errors":[...]}` |
 
 **Validation error codes:**
 
 | Code | Description |
-| --- | --- |
-| `MISSING_CONFIG` | `config.yaml` is absent from the source branch |
-| `MISSING_KEY` | A key present in `base_locale` is absent in another locale (only applies with `on_missing_translation: error`) |
-| `ORPHAN_KEY` | A key exists in a non-primary locale but not in `base_locale` |
-| `PLACEHOLDER_MISMATCH` | A locale's value for a key contains different ICU variables than the `base_locale` equivalent |
-| `BROKEN_FALLBACK_CHAIN` | A locale referenced in `fallback_chains` does not exist in the library |
-| `MISSING_TEMPLATE` | A template file referenced in `config.yaml` does not exist in the branch |
-| `TEMPLATE_COMPILE_ERROR` | A template referenced in `config.yaml` fails Handlebars compilation |
+|------|-------------|
+| `MISSING_CONFIG` | `config.yaml` absent from source branch |
+| `MISSING_KEY` | Key from `base_locale` absent in another locale (`on_missing_translation: error` only) |
+| `ORPHAN_KEY` | Key in non-primary locale has no counterpart in `base_locale` |
+| `PLACEHOLDER_MISMATCH` | ICU variables differ from the `base_locale` equivalent |
+| `BROKEN_FALLBACK_CHAIN` | A `fallback_chains` target locale does not exist in the library |
+| `MISSING_TEMPLATE` | Template referenced in `config.yaml` not found in branch |
+| `TEMPLATE_COMPILE_ERROR` | Referenced template fails Handlebars compilation |
 
 ---
 
 ### 7.6 Retrieve Translations
 
-To avoid URL path-segment ambiguity (draft branch names such as `main` would conflict with a generic `{ref}` parameter), the retrieval API uses two explicit URL prefixes: `releases/{version}` for frozen versions and `drafts/{branch}` for active branches.
-
-**Draft endpoints require authentication. Release endpoints are unauthenticated.**
-
----
+Draft endpoints require authentication; release endpoints are unauthenticated.
 
 **A) Single Section Request:**
-
-Returns the natively formatted file for the requested section.
-
 ```sh
-GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{section}.{extension}
-GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{section}.{extension}
+GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{section}.{ext}
+GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{section}.{ext}
 ```
-
-**Supported formats and extensions:**
-
-| `format` | Valid `extension` | Output Handled |
-| --- | --- | --- |
-| `android` | `.xml` | Translates ICU plurals to `<plurals>` |
-| `ios` | `.strings`, `.xcstrings` | Generates associated `.stringsdict` for plurals |
-| `json` | `.json` | Raw ICU strings |
-| `gettext` | `.po` | Standard Gettext mapping |
-| *(custom)* | *(custom)* | Dynamically resolved via `config.yaml` `custom_formats` |
 
 **B) Multi-Section or Full Library Request:**
 
-When requesting multiple sections or the entire library, the extension **MUST be `.zip`**.
+— extension must be `.zip`; returns one file per section:
 
 ```sh
-# Multiple specific sections
-GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{section1},{section2}.zip
-GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{section1},{section2}.zip
-
-# Full library (all sections)
+GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{s1},{s2}.zip
 GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}.zip
-GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}.zip
 ```
 
-The returned zip contains one file per requested section in the requested `{format}`. Requesting any other extension (e.g., `.xml`, `.strings`) for multiple sections returns `400 BAD_REQUEST`.
+Using any extension other than `.zip` for a multi-section request returns `400 BAD_REQUEST`.
+
+**Supported formats:**
+
+| `format` | `extension` | Notes |
+|----------|-------------|-------|
+| `android` | `.xml` | ICU plurals → `<plurals>` |
+| `ios` | `.strings`, `.xcstrings` | `.stringsdict` generated for plurals |
+| `json` | `.json` | Raw ICU strings |
+| `gettext` | `.po` | Standard Gettext |
+| *(custom)* | *(custom)* | Resolved via `custom_formats` in `config.yaml` |
 
 ---
 
@@ -624,14 +327,7 @@ Response headers: `Cache-Control: no-store`.
 
 ### 7.8 Error Responses
 
-Standard JSON error bodies:
-
-```json
-{
-  "error": "ERROR_CODE",
-  "message": "Human-readable description."
-}
-```
+All errors return `{"error": "ERROR_CODE", "message": "Human-readable description."}`.
 
 | HTTP Code | `error` value | Meaning |
 | --- | --- | --- |
