@@ -47,10 +47,10 @@ Follows Semantic Versioning (MAJOR.MINOR.PATCH). Releases are **immutable once f
 
 ### 3.1 Workflow
 
-1. **Active Development:** Edits via the UI typically happen on the `drafts/main` branch. Requests targeting a draft branch are **dynamically generated** on API calls to reflect immediate updates.
+1. **Active Development:** Edits via the UI typically happen on the `main` branch. Requests targeting a draft branch are **dynamically generated** on API calls to reflect immediate updates.
 2. **Freezing Releases:** A specific endpoint freezes a valid draft state into an immutable release version (e.g., `1.0.0`). Once frozen, releases are static.
 3. **Hotfixing (Branching):** If `1.0.0` is in production but `main` has already moved to `2.0.0`, developers can branch `releases/1.0.0` into a new draft `drafts/1.0.x`, apply the fix, and freeze as `1.0.1`.
-4. **Artifact Storage:** When a release is requested, the service checks the internal `.generated/` path. If missing, it generates the file using **atomic write operations** (writing to `.tmp` and renaming) to prevent race conditions, then serves it.
+4. **Artifact Storage:** When a release is requested, the service checks the internal `.generated/` path. If missing, it generates the file using **atomic write operations** (writing to `.tmp` file and renaming) to prevent race conditions, then serves it.
 
 ---
 
@@ -156,10 +156,9 @@ To prevent workflow gridlock while ensuring production stability, validation rul
 
 ## 7. API
 
-### 7.1 Base URL & Authentication
+### 7.1 Base URL
 
 `/api/v1`
-The API requires standard OIDC / JWT `Authorization: Bearer <TOKEN>` to track user identity for audit logs. Service accounts can use Long-Lived Personal Access Tokens.
 
 ---
 
@@ -179,7 +178,7 @@ Returns a fully featured web UI (HTML/JS/CSS). The Dashboard allows administrato
 - Delete existing draft libraries or sections.
 
 **Management APIs:**
-The UI interacts with the following backend APIs to modify working drafts.
+The UI interacts with the following backend APIs to modify working drafts. All require standard OIDC / JWT `Authorization: Bearer <TOKEN>` to track user identity for audit logs. Service accounts can use Long-Lived Personal Access Tokens.
 
 - `POST /api/v1/manage/{library}/branches/{branch}` (Create new branch from release or main)
 - `PUT /api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` (Update translations)
@@ -221,7 +220,7 @@ Returns `422 UNPROCESSABLE_ENTITY` with a validation report if it fails.
 
 ### 7.4 Retrieve Translations
 
-`{ref}` can be an explicit frozen version (e.g., `1.0.0`) or a draft branch (e.g., `drafts/main`).
+`{ref}` can be an explicit frozen version (e.g., `1.0.0`) or a draft branch (e.g., `main`).
 
 **A) Single Section Request:**
 Returns the natively formatted file for the requested section.
@@ -241,24 +240,15 @@ GET /api/v1/translations/{library}/{ref}/{format}/{locale}/{section}.{extension}
 | *(custom)* | *(custom)* | Dynamically resolved via `config.yaml` |
 
 **B) Multi-Section or Full Library Request:**
-When requesting multiple sections OR the entire library, the extension **MUST be `.json`**.
+When requesting multiple sections OR the entire library, the extension **MUST be `.zip`**.
 
 ```sh
-GET /api/v1/translations/{library}/{ref}/{format}/{locale}/{section1},{section2}.json
-GET /api/v1/translations/{library}/{ref}/{format}/{locale}.json
+GET /api/v1/translations/{library}/{ref}/{format}/{locale}/{section1},{section2}.zip
+GET /api/v1/translations/{library}/{ref}/{format}/{locale}.zip
 ```
 
+The returned zip will contain all the requested section files with the requested `{format}`.
 Requesting any other extension (e.g., `.xml`, `.strings`) for multiple sections will return a `400 BAD_REQUEST`.
-
-**JSON Response Structure:**
-The response encapsulates each requested section, mapping the section name to its rendered string in the requested `{format}`.
-
-```json
-{
-  "login": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n<string name=\"sign-in\">Sign in</string>\n</resources>",
-  "checkout": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n<string name=\"pay\">Pay</string>\n</resources>"
-}
-```
 
 ---
 
@@ -268,7 +258,7 @@ The response encapsulates each requested section, mapping the section name to it
    Artifacts are checked against `.generated/`. Missing files are generated using **atomic writes** (`temp-write` -> `rename`) to prevent race conditions during high concurrency.
    Responses include aggressive caching: `Cache-Control: public, max-age=31536000, immutable`.
 
-- **For Active Drafts (`drafts/main`):**
+- **For Active Drafts (`main`):**
    Dynamically computed to ensure the absolute latest edits are served.
 
 ---
