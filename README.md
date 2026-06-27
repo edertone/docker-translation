@@ -8,7 +8,6 @@ The service provides "working drafts" for active translation editing through a b
 
 **Core principles:**
 
-- **Technology Stack:** Java 21, Spring Boot 3.2+, fully containerized.
 - **Canonical YAML storage:** Single source of truth saved into the container file system.
 - **Draft & Release states:** Actively edit draft branches (e.g., `main`); freeze deterministic releases (e.g., `1.0.0`) for production.
 - **Platform-agnostic output:** Native formats (including plurals mapping) plus custom Handlebars templates.
@@ -18,7 +17,7 @@ The service provides "working drafts" for active translation editing through a b
 
 ## 2. Storage Structure
 
-Translations, templates, and internally generated files are stored in a centralized storage root that can be mounted into a docker volume or AWS EFS, Kubernetes `ReadWriteMany` PV to prevent split-brain issues across multiple container replicas.
+Translations, templates, and internally generated files are stored in a centralized storage root that can be mounted into a docker volume or AWS EFS, Kubernetes `ReadWriteMany` PV to prevent split-brain issues across multiple container replicas. The absolute path to this storage root must be injected into the Spring Boot application via an environment variable (e.g., TRANSLATION_STORAGE_ROOT), defaulting to ./storage for local development.
 
 The structure isolates `drafts` (working states) from `releases` (frozen versions), and maintains a `.generated` directory for compiled artifacts.
 
@@ -201,7 +200,7 @@ None of the microservice endpoints require authentication. This microservice is 
 GET /dashboard
 ```
 
-Serves the admin web UI (HTML/JS/CSS). Supports: creating and deleting libraries, branches, sections, and locales; editing translations, `config.yaml`, and Handlebars templates; publishing (freezing) releases.
+Serves the admin web UI. Supports: creating and deleting libraries, branches, sections, and locales; editing translations, `config.yaml`, and Handlebars templates; publishing (freezing) releases.
 
 ---
 
@@ -340,6 +339,8 @@ Response headers: `Cache-Control: public, max-age=31536000, immutable`.
 Dynamically computed on every request to ensure the absolute latest edits are served.
 Response headers: `Cache-Control: no-store`.
 
+- Handlebars template execution must be strictly bounded (e.g., maximum 2000ms execution time, 5MB max output size limit) to prevent malicious or poorly written templates from causing JVM Out-Of-Memory (OOM) crashes or CPU starvation.
+
 ---
 
 ### 7.8 Error Responses
@@ -368,3 +369,10 @@ Exposed via Spring Boot Actuator (`/actuator`):
 
 - `/actuator/prometheus`: Disk-based generation metrics, request latency, JVM memory.
 - `/actuator/health/liveness` & `readiness`: Standard health probes for Kubernetes/ECS integration.
+
+## 9. Technology Stack
+
+- **Dashboard UI:** Serves the admin web UI as a Single Page Application (SPA) built with Angular 22. It must use Angular's idiomatic HttpClient and RxJS Observables to communicate with the REST endpoints, and EventSource for the SSE stream. The UI should be styled using Angular Material and use signals for visual reactivity.
+- **Backend:** Java 21, Spring Boot 3.2+, Gradle, fully containerized. For YAML parsing jackson-dataformat-yaml, handlebars.java for template compilation and ibm.icu4j for ICU MessageFormat/Plural validation.
+- **Containerization:** Multi-stage Dockerfile using eclipse-temurin:21-jdk-alpine for the build step and eclipse-temurin:21-jre-alpine for the runtime step. The container exposes port 8080 and defines a VOLUME for the storage root. Ready to use as a service on docker compose.
+- **Testing:** JUnit 5 integration tests using @SpringBootTest for all possible use cases, including Phase 1 and Phase 2 validation, and use MockMvc to test the API endpoints.
