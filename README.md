@@ -12,7 +12,7 @@ The service provides "working drafts" for active translation editing through a b
 - **Canonical YAML storage:** Single source of truth saved into the container file system.
 - **Draft & Release states:** Actively edit draft branches (e.g., `main`); freeze deterministic releases (e.g., `1.0.0`) for production.
 - **Platform-agnostic output:** Native formats (including plurals mapping) plus custom Handlebars templates.
-- **File-based Generation:** Artifacts are generated on demand, cached safely using atomic operations, and served rapidly.
+- **File-based Generation:** Artifacts are generated on demand, cached safely using atomic file system operations, and served rapidly.
 
 ---
 
@@ -33,15 +33,15 @@ The structure isolates `drafts` (working states) from `releases` (frozen version
 <storage>/library-name/drafts/1.0.x/...  # Hotfix branches
 ```
 
-When a draft is frozen, **all files** — YAML translations, `config.yaml`, and all template files — are cloned into the release directory. After freezing, the release is immutable; only `.generated/` artifacts are ever written to it.
-
 **Library, branch and section naming:** Lowercase letters, digits, and hyphens only. Must begin and end with a letter or digit.
+
+When a draft is frozen, **all files** — YAML translations, `config.yaml`, and all template files — are cloned into the release directory. After freezing, the release is immutable; only `.generated/` artifacts are ever written to it.
 
 ---
 
 ## 3. Versioning
 
-Follows Semantic Versioning (MAJOR.MINOR.PATCH). Releases are **immutable once frozen**. Version strings must use the strict `MAJOR.MINOR.PATCH` format with non-negative integers. The `v` prefix and partial versions (e.g., `1.0`) are not accepted.
+Follows Semantic Versioning (MAJOR.MINOR.PATCH). Releases are **immutable once frozen** and cannot be deleted. Version strings must use the strict `MAJOR.MINOR.PATCH` format with non-negative integers. The `v` prefix and partial versions (e.g., `1.0`) are not accepted.
 
 | Change type | Bump |
 | --- | --- |
@@ -121,11 +121,11 @@ Inside `{{#each translations}}` blocks, standard Handlebars data variables are a
 
 ## 5. Library Configuration (`config.yaml`)
 
-Required at the root of every library branch **before freezing**. A branch may be created and edited without a `config.yaml`, but a missing or malformed file causes the freeze to be rejected. The `POST /api/v1/manage/{library}` endpoint initializes a branch with a valid `config.yaml`.
+Required at the root of every library branch. It is created always as part of a new branch, and will be initialized with default values for mandatory settings. A missing or malformed `config.yaml` will cause freezes to be rejected.
 
 ```yaml
 base_locale: "en-US"        # Primary locale — defines the master key set
-on_missing_translation: "fallback"
+on_missing_translation: "fallback" # Default value is "error"
 
 # Optional hierarchical fallback chains.
 # Only meaningful when on_missing_translation is "fallback".
@@ -187,10 +187,7 @@ To prevent workflow gridlock while ensuring production stability, validation rul
 
 ### 7.2 Authentication
 
-All management and draft-read endpoints require `Authorization: Bearer <TOKEN>`.
-
-- **Release endpoints** (`/api/v1/translations/{library}/releases/...`) — unauthenticated; CDN-friendly.
-- **Draft endpoints** (`/api/v1/translations/{library}/drafts/...`) — token required.
+None of the microservice endpoints require authentication. This microservice is meant to be used internally, so authentication is delegated to the infrastructure were this container will live.
 
 ---
 
@@ -206,15 +203,15 @@ Serves the admin web UI (HTML/JS/CSS). Supports: creating and deleting libraries
 
 ### 7.4 Management API
 
-All endpoints in this section require authentication. Concurrent edits use **Last-Write-Wins**; active sessions are notified of file changes in real time via SSE (`GET /api/v1/manage/stream`).
+Concurrent edits use **Last-Write-Wins**; active sessions are notified of file changes in real time via SSE (`GET /api/v1/manage/stream`).
 
 | Method | Path | Request body | Success | Notes |
 | -------- | ------ | ------------- | --------- | ------- |
 | `GET` | `/manage` | — | `200` `["users","products"]` | List libraries |
-| `POST` | `/manage/{library}` | `{"base_locale","on_missing_translation"}` | `201` `{"library","branch"}` | Creates library + `drafts/main/config.yaml` |
+| `POST` | `/manage/{library}` | `{"base_locale","on_missing_translation"}` | `201` `{"library","branch"}` | Creates library + `drafts/branch/config.yaml` |
 | `GET` | `/manage/{library}` | — | `200` `{"library","drafts":[],"releases":[]}` | Library overview |
 | `GET` | `/manage/{library}/releases` | — | `200` `["1.0.0","1.1.0"]` | List frozen releases |
-| `DELETE` | `/manage/{library}` | — | `204` | Deletes all drafts; releases retained |
+| `DELETE` | `/manage/{library}` | — | `204` | Deletes library and all drafts; releases retained |
 | `POST` | `/manage/{library}/branches/{branch}` | `{"source"}` | `201` `{"library","branch","source"}` | `source` may be a draft name or release version; clones all files |
 | `GET` | `/manage/{library}/drafts/{branch}` | — | `200` `{"sections":{},"templates":[],"has_config":true}` | Branch overview |
 | `DELETE` | `/manage/{library}/drafts/{branch}` | — | `204` | — |
@@ -284,27 +281,31 @@ Runs Phase 2 validation then clones the draft into an immutable release.
 
 ### 7.6 Retrieve Translations
 
-Draft endpoints require authentication; release endpoints are unauthenticated.
+All translation keys are processed when retrieved, so "libraryname.section." Is appended before the key name on all the generated files. This is to prevent key colision when multiple sections or libraries are requested by a single api call and merged into the same format file.
 
 **A) Single Section Request:**
 
 ```sh
-GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{section}.{ext}
-GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{section}.{ext}
+GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{section}.{extension}
+GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{section}.{extension}
 ```
 
 **B) Multi-Section or Full Library Request:**
 
-— extension must be `.zip`; returns one file per section:
+— When the user requests several sections or the full library at once, all the different section keys are merged into the same file. No collision will happen due to the "libraryname.section." string being appended before each section key.
 
 ```sh
-GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{s1},{s2}.zip
-GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}.zip
+GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{s1},{s2}.extension
+GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}.extension
 ```
 
-Using any extension other than `.zip` for a multi-section request returns `400 BAD_REQUEST`.
+**C) Multi-Library request:**
 
-**Supported formats:**
+```sh
+GET /api/v1/translations/{library1-version},{library2-version}/{format}/{locale}.extension
+```
+
+#### 7.6.1 Supported formats
 
 | `format` | `extension` | Notes |
 | ---------- | ------------- | ------- |
@@ -335,8 +336,6 @@ All errors return `{"error": "ERROR_CODE", "message": "Human-readable descriptio
 | HTTP Code | `error` value | Meaning |
 | --- | --- | --- |
 | `400` | `BAD_REQUEST` | Malformed request, invalid version format, or unsupported format/extension combination. |
-| `401` | `UNAUTHORIZED` | Missing or invalid authentication token. |
-| `403` | `FORBIDDEN` | Authenticated user or PAT lacks permission for the requested operation. |
 | `404` | `NOT_FOUND` | Library, branch, version, section, or locale not found. |
 | `409` | `CONFLICT` | Attempted to freeze to a version string that already exists. |
 | `422` | `UNPROCESSABLE_ENTITY` | Integrity validation failures during a freeze operation. [See 7.5](#75-freeze-library-version-publish) for the full validation error structure. |
