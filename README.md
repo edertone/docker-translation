@@ -375,4 +375,5 @@ Exposed via Spring Boot Actuator (`/actuator`):
 - **Dashboard UI:** Serves the admin web UI as a Single Page Application (SPA) built with Angular 22. It must use Angular's idiomatic HttpClient and RxJS Observables to communicate with the REST endpoints, and EventSource for the SSE stream. The UI should be styled using Angular Material and use signals for visual reactivity.
 - **Backend:** Java 21, Spring Boot 3.2+, Gradle, fully containerized. For YAML parsing jackson-dataformat-yaml, handlebars.java for template compilation and ibm.icu4j for ICU MessageFormat/Plural validation.
 - **Containerization:** Multi-stage Dockerfile using eclipse-temurin:21-jdk-alpine for the build step and eclipse-temurin:21-jre-alpine for the runtime step. The container exposes port 8080 and defines a VOLUME for the storage root. Ready to use as a service on docker compose.
-- **Testing:** JUnit 5 integration tests using @SpringBootTest for all possible use cases, including Phase 1 and Phase 2 validation, and use MockMvc to test the API endpoints.
+- **Backend Testing:** JUnit 5 integration tests using @SpringBootTest for all possible use cases, including Phase 1 and Phase 2 validation, and use MockMvc to test the API endpoints.
+- **Frontend Testing:** Playwright tests to check the full e2e behaviour of the UI.
