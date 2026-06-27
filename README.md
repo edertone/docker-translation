@@ -84,9 +84,13 @@ To support arbitrary application requirements, custom formats can be defined usi
   "library": "users",
   "version": "1.0.0",
   "locale": "en-US",
-  "section": "login",
-  "translations": [
-    { "key": "sign_in", "value": "Sign in" }
+  "sections": [
+    { 
+      "name": "login", 
+      "translations": [
+        { "key": "sign_in", "value": "Sign in" }
+      ] 
+    }
   ]
 }
 ```
@@ -97,10 +101,12 @@ To support arbitrary application requirements, custom formats can be defined usi
 
 ```handlebars
 # Generated translations for {{library}} - {{locale}}
-# Section: {{section}}
 
+{{#each sections}}
+# Section: {{name}}
 {{#each translations}}
-{{key}}="{{value}}"
+{{../name}}_{{key}}="{{value}}"
+{{/each}}
 {{/each}}
 ```
 
@@ -146,9 +152,9 @@ custom_formats:
 | Mode | Behavior |
 | --- | --- |
 | `error` | Reject the library at freeze time if any locale in any section is missing keys defined by `base_locale`. Phase 1 saves emit a non-blocking completeness warning in the API response when this mode is active, alerting editors before freeze. |
-| `fallback` | 1. Traverse `fallback_chains` if the locale is mapped. 2. If unmapped or the chain is exhausted, implicitly drop the BCP-47 region code (e.g., `es-AR` → `es`). 3. If still missing, use the value from `base_locale`. |
+| `fallback` | 1. Traverse `fallback_chains` if the locale is mapped. 2. If unmapped or the chain is exhausted, implicitly drop the region code (e.g., `es-AR` → `es`). 3. If still missing, use the value from `base_locale`. |
 | `return_key` | Replace missing value with the raw key name (e.g. `"login"`). |
-| `return_empty` | Replace missing value with `""`. |
+| `return_empty` | Replace missing value with `"" (Preserving plurals if necessary)`. |
 
 ---
 
@@ -201,8 +207,6 @@ Serves the admin web UI (HTML/JS/CSS). Supports: creating and deleting libraries
 
 ### 7.4 Management API
 
-Concurrent edits use **Last-Write-Wins**; active sessions are notified of file changes in real time via SSE (`GET /api/v1/manage/stream`).
-
 | Method | Path | Request body | Success | Notes |
 | -------- | ------ | ------------- | --------- | ------- |
 | `GET` | `/api/v1/manage` | — | `200` `["users","products"]` | List libraries |
@@ -220,7 +224,7 @@ Concurrent edits use **Last-Write-Wins**; active sessions are notified of file c
 | `DELETE` | `/api/v1/manage/{library}/drafts/{branch}/templates/{template}` | — | `204` | `config.yaml` refs → Phase 2 failure at freeze |
 | `POST` | `/api/v1/manage/{library}/drafts/{branch}/{section}` | — | `201` `{"section","branch"}` | Create section |
 | `DELETE` | `/api/v1/manage/{library}/drafts/{branch}/{section}` | — | `204` | Frozen data retained |
-| `POST` | `/api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` | optional YAML | `201` | `{locale}` must be a valid BCP 47 tag; Phase 1 runs if body provided |
+| `POST` | `/api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` | optional YAML | `201` | `{locale}` must be a valid formatted locale; Phase 1 runs if body provided |
 | `GET` | `/api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` | — | `200` YAML | Raw translation file |
 | `PUT` | `/api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` | YAML body | `204` / `200+warnings` | Phase 1; returns `200` with `warnings` body if `on_missing_translation: error` and keys are missing |
 | `DELETE` | `/api/v1/manage/{library}/drafts/{branch}/{section}/{locale}` | — | `204` | Frozen data retained |
@@ -245,6 +249,13 @@ Concurrent edits use **Last-Write-Wins**; active sessions are notified of file c
 ```json
 { "library": "my-app", "branch": "main", "section": "login", "locale": "es-ES", "change": "updated|created|deleted", "timestamp": "2024-05-10T14:30:00Z" }
 ```
+
+**Concurrency management:**
+
+- Active sessions are notified of file changes in real time via SSE (`GET /api/v1/manage/stream`).
+- GET endpoints return an ETag header (e.g., a hash of the file contents).
+- PUT endpoints require an If-Match: ETag header.
+- If the backend detects the file has changed since the user loaded it, it returns 412 Precondition Failed. The UI can then fetch the latest changes and alert the user, completely preventing data loss.
 
 ---
 
@@ -279,7 +290,7 @@ Runs Phase 2 validation then clones the draft into an immutable release.
 
 ### 7.6 Retrieve Translations
 
-All translation keys are processed when retrieved, so "libraryname_section_" is appended before the key name on all the generated files. This is to prevent key collision when multiple sections or libraries are requested by a single api call and merged into the same format file. Hyphens in library and section names are converted to underscores when constructing the key prefix.
+When the user requests several sections or libraries at once, all the keys will be merged into the same file.
 
 **A) Single Section Request:**
 
@@ -291,19 +302,21 @@ GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{section}.{
 **B) Multi-Section or Full Library Request:**
 
 ```sh
-GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}/{s1},{s2}.{extension}
+GET /api/v1/translations/{library}/releases/{version}/bulk?targets=section1,section2&format={format}&locale={locale}&extension={extension}
 GET /api/v1/translations/{library}/releases/{version}/{format}/{locale}.{extension}
-GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}/{s1},{s2}.{extension}
+GET /api/v1/translations/{library}/drafts/{branch}/bulk?targets=section1,section2&format={format}&locale={locale}&extension={extension}
 GET /api/v1/translations/{library}/drafts/{branch}/{format}/{locale}.{extension}
 ```
+
+When requesting multiple sections as a single file for native formats, all translation keys will be modified to append "section_" before key names. This is to prevent collisions when multiple sections are requested by a single api call. Hyphens in section names will be converted to underscores when constructing the key prefix.
 
 **C) Multi-Library request:**
 
 ```sh
-GET /api/v1/translations/{library1:version},{library2:version},{library3:branch}/{format}/{locale}.{extension}
+GET /api/v1/translations/bulk?targets=library1:version,library2:version,library3:branch&format={format}&locale={locale}&extension={extension}
 ```
 
-When the user requests several sections or the full library at once, all the different section keys are merged into the same file. No collision will happen due to the "libraryname_section_" string being appended before each section key. If a custom format is requested, each section file will be generated as specified by the template and then all merged into the single file.
+When requesting multiple libraries as a single file for native formats, all translation keys will be modified to append "libraryname_section_" before key names. This is to prevent collisions when multiple libraries are requested by a single api call. Hyphens in library and section names will be converted to underscores when constructing the key prefix.
 
 #### 7.6.1 Supported formats
 
@@ -340,6 +353,7 @@ All errors return `{"error": "ERROR_CODE", "message": "Human-readable descriptio
 | `409` | `CONFLICT` | Attempted to freeze to a version string that already exists. |
 | `422` | `UNPROCESSABLE_ENTITY` | Integrity validation failures during a freeze operation. [See 7.5](#75-freeze-library-version-publish) for the full validation error structure. |
 | `500` | `INTERNAL_ERROR` | Internal transformation failure (e.g., I/O write error, Handlebars rendering error). |
+| `412` | `PRECONDITION_FAILED` | File modified by another user since last retrieved. UI must resolve the conflict. |
 
 ---
 
